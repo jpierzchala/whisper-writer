@@ -6,7 +6,7 @@
     <img src="./assets/ww-demo-image-02.gif" alt="WhisperWriter demo gif" width="340" height="136">
 </p>
 
-WhiisperWriter is a speech-to-text app that lets you dictate and transcribe text, entering it in any app on your computer. It can do so using local transcription models (OpenAI's Whisper models or Alpha Cephei's Vosk models), or via API-based services including OpenAI, Deepgram, and Groq.
+WhisperWriter is a speech-to-text app that lets you dictate and transcribe text, entering it in any app on your computer. It can do so using local transcription models (OpenAI's Whisper models or Alpha Cephei's Vosk models), or via API-based services including OpenAI, Deepgram, and Groq.
 
 This version of the app started as a Windows-focused fork by [Thomas Frank](https://github.com/TomFrankly). The README below has been updated to include all of the changes and updates.
 
