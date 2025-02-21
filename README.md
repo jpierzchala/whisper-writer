@@ -107,6 +107,13 @@ cd whisper-writer
 # "python -m venv" is used to create a virtual environment. The second "venv" is the name of the virtual environment and its directory.
 python -m venv venv
 
+# Or, if you have multiple versions of Python installed, you can specify 3.12:
+python -3.12 -m venv venv
+```
+
+Next, activate the virtual environment:
+
+```
 # For Windows:
 venv\Scripts\activate
 
