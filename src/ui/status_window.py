@@ -93,6 +93,10 @@ class StatusWindow(BaseWindow):
 
     def format_key_combo(self, key_combo: str) -> str:
         """Convert key combination to symbolic representation."""
+        # Return empty string if key_combo is None
+        if not key_combo:
+            return ''
+
         key_map = {
             'ctrl': 'CTRL',
             'shift': 'SHIFT',
