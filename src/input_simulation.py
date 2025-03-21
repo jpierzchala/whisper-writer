@@ -76,6 +76,20 @@ class InputSimulator:
             self._typewrite_ydotool(text, interval)
         elif self.input_method == 'dotool':
             self._typewrite_dotool(text, interval)
+    
+    @staticmethod
+    def safe_open_clipboard(max_retries=5, delay=0.1):
+        """
+        Try to open the clipboard repeatedly.
+        Returns True if successful, else False.
+        """
+        for _ in range(max_retries):
+            try:
+                win32clipboard.OpenClipboard()
+                return True
+            except Exception:
+                time.sleep(delay)
+        return False
 
     def _paste_with_clipboard_preservation(self, text):
         """
@@ -87,7 +101,9 @@ class InputSimulator:
         """
         # Store all clipboard formats
         saved_formats = {}
-        win32clipboard.OpenClipboard()
+        if not InputSimulator.safe_open_clipboard():
+            print("Unable to open clipboard for preserving original content.")
+            return
         
         try:
             # Get the list of available formats
@@ -99,38 +115,44 @@ class InputSimulator:
                 except:
                     pass  # Skip formats we can't handle
                 format_id = win32clipboard.EnumClipboardFormats(format_id)
-                
+            
             # Clear clipboard and set our text
             win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(text)
-            win32clipboard.CloseClipboard()
+            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+        finally:
+            try:
+                win32clipboard.CloseClipboard()
+            except:
+                pass  # Ensure clipboard is closed even if an error occurred
+
+        # Simulate Ctrl+V
+        if self.input_method == 'pynput':
+            with self.keyboard.pressed(Key.ctrl):
+                self.keyboard.press('v')
+                self.keyboard.release('v')
+        elif self.input_method == 'ydotool':
+            run_command_or_exit_on_failure([
+                "ydotool", "key", "ctrl+v"
+            ])
+        elif self.input_method == 'dotool':
+            assert self.dotool_process and self.dotool_process.stdin
+            self.dotool_process.stdin.write("key ctrl+v\n")
+            self.dotool_process.stdin.flush()
             
-            # Simulate Ctrl+V
-            if self.input_method == 'pynput':
-                with self.keyboard.pressed(Key.ctrl):
-                    self.keyboard.press('v')
-                    self.keyboard.release('v')
-            elif self.input_method == 'ydotool':
-                run_command_or_exit_on_failure([
-                    "ydotool", "key", "ctrl+v"
-                ])
-            elif self.input_method == 'dotool':
-                assert self.dotool_process and self.dotool_process.stdin
-                self.dotool_process.stdin.write("key ctrl+v\n")
-                self.dotool_process.stdin.flush()
-                
-            # Wait for paste to complete
-            time.sleep(0.1)
-            
-            # Restore all original clipboard formats
-            win32clipboard.OpenClipboard()
+        # Wait for paste to complete
+        time.sleep(0.1)
+        
+        # Restore all original clipboard formats
+        if not InputSimulator.safe_open_clipboard():
+            print("Unable to reopen clipboard for restoring original content.")
+            return
+        try:
             win32clipboard.EmptyClipboard()
             for format_id, data in saved_formats.items():
                 try:
                     win32clipboard.SetClipboardData(format_id, data)
                 except:
                     pass  # Skip if we can't restore a particular format
-                    
         finally:
             try:
                 win32clipboard.CloseClipboard()
