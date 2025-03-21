@@ -41,6 +41,7 @@ model_options:
         - whisper-large-v3-turbo
         - distil-whisper-large-v3-en
         - whisper-large-v3
+        - gpt-4o-transcribe
     openai_transcription_api_key:
       value: null
       type: str

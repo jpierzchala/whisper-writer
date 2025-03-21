@@ -307,12 +307,14 @@ def transcribe_with_openai(audio_data, api_options):
         sf.write(byte_io, audio_data, 16000, format='wav')
         byte_io.seek(0)
         
+        model = api_options['model']
+
         files = {
             'file': ('audio.wav', byte_io, 'audio/wav'),
-            'model': (None, 'whisper-1'),
+            'model': (None, model),
         }
         
-        ConfigManager.console_print("Sending request to OpenAI API...")
+        ConfigManager.console_print(f"Sending request to OpenAI API using {model}...")
         response = requests.post(
             f"{base_url}/audio/transcriptions",
             headers=headers,
