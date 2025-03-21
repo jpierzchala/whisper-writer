@@ -771,10 +771,7 @@ class SettingsWindow(BaseWindow):
                 with open(file_path, 'r', encoding='utf-8') as file:
                     content = file.read()
                     current_text = text_edit.toPlainText()
-                    if current_text:
-                        text_edit.setText(f"{current_text}\n\n{content}")
-                    else:
-                        text_edit.setText(content)
+                    text_edit.setText(current_text)
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to read file: {str(e)}")
 
