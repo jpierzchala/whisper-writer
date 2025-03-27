@@ -182,9 +182,12 @@ class LLMProcessor:
             'messages': [
                 {'role': 'system', 'content': system_message},
                 {'role': 'user', 'content': text}
-            ],
-            'temperature': self.config['temperature']
+            ]
         }
+
+        # Only include temperature parameter for non-OpenAI (o*) family models
+        if not model.startswith('o'):
+            data['temperature'] = self.config['temperature']
         
         try:
             response = requests.post(
