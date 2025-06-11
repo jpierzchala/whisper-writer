@@ -197,6 +197,17 @@ class StatusWindow(BaseWindow):
             self.icon_label.setPixmap(self.pencil_pixmap)
             self.status_label.setText('Transcribing...')
             self.shortcuts_label.hide()
+
+        elif status == 'transcription_failed':
+            self.icon_label.setPixmap(self.pencil_pixmap)
+            self.status_label.setText('Transcription Failed - Audio Saved')
+            self.status_label.setStyleSheet('color: white;')
+            self.setStyleSheet(
+                "background-color: #cc3333; border: 1px solid #ffaaaa; border-radius: 5px;"
+            )
+            self.shortcuts_label.hide()
+            QTimer.singleShot(3000, self.close)
+            self.show()
             
         elif status == 'processing_llm_cleanup':
             self.icon_label.setPixmap(self.pencil_pixmap)
