@@ -142,6 +142,10 @@ recording_options:
       - auto
       - evdev
       - pynput
+  enable_mouse_listener:
+    value: true
+    type: bool
+    description: "Enable capturing mouse button events. Disable if you experience issues when scrolling."
   recording_mode:
     value: press_to_toggle
     type: str
@@ -301,3 +305,7 @@ misc:
     value: false
     type: bool
     description: "Automatically pause/resume media during recording"
+  log_input_events:
+    value: false
+    type: bool
+    description: "Write all input events to 'input_debug.log' for troubleshooting."

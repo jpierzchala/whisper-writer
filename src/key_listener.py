@@ -954,11 +954,15 @@ class PynputBackend(InputBackend):
             on_press=self._on_keyboard_press,
             on_release=self._on_keyboard_release
         )
-        self.mouse_listener = self.mouse.Listener(
-            on_click=self._on_mouse_click
-        )
+
         self.keyboard_listener.start()
-        self.mouse_listener.start()
+
+        if ConfigManager.get_config_value('recording_options', 'enable_mouse_listener'):
+            self.mouse_listener = self.mouse.Listener(
+                on_click=self._on_mouse_click,
+                on_scroll=self._on_mouse_scroll
+            )
+            self.mouse_listener.start()
 
     def stop(self):
         """Stop listening for keyboard and mouse events."""
@@ -1059,6 +1063,7 @@ class PynputBackend(InputBackend):
                 # print(f"Press event: {translated_event}")
                 self._pressed_keys.add(translated_event[0])
             self.on_input_event(translated_event)
+            self._log_event(f"key_press {key}")
 
     def _on_keyboard_release(self, key):
         """Handle keyboard release events."""
@@ -1070,12 +1075,18 @@ class PynputBackend(InputBackend):
                 # print(f"Release event: {translated_event}")
                 self._pressed_keys.discard(translated_event[0])
             self.on_input_event(translated_event)
+            self._log_event(f"key_release {key}")
 
     def _on_mouse_click(self, x, y, button, pressed):
         """Handle mouse click events."""
         translated_event = self._translate_key_event((button, pressed))
         if translated_event:
             self.on_input_event(translated_event)
+            self._log_event(f"mouse_click {button} pressed={pressed}")
+
+    def _on_mouse_scroll(self, x, y, dx, dy):
+        """Handle mouse scroll events for debugging."""
+        self._log_event(f"mouse_scroll dx={dx} dy={dy}")
 
     def _create_key_map(self):
         """Create a mapping from pynput keys to our internal KeyCode enum."""
@@ -1233,8 +1244,14 @@ class PynputBackend(InputBackend):
             self.keyboard.KeyCode.from_char(c.lower()): getattr(KeyCode, c)
             for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
         })
-        
+
         return key_map
+
+    def _log_event(self, message: str):
+        """Log input events if enabled."""
+        if ConfigManager.get_config_value('misc', 'log_input_events'):
+            with open('input_debug.log', 'a', encoding='utf-8') as f:
+                f.write(f"{time.time()}: {message}\n")
 
     def on_input_event(self, event):
         """
