@@ -140,3 +140,6 @@ config.yaml
 *.cfg
 *.db
 /keyring/*
+
+# Prompts
+*.txt
