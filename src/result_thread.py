@@ -105,15 +105,22 @@ class ResultThread(QThread):
                 result = transcribe(audio_data, self.local_model)
                 end_time = time.time()
 
-                transcription_time = end_time - start_time
-                if result:
+                    transcription_time = end_time - start_time
+                    if result and result.strip():
+                        ConfigManager.console_print(
+                            f'Transcription completed in {transcription_time:.2f} seconds on attempt {attempt}. Post-processed line: {result}'
+                        )
+                        break
                     ConfigManager.console_print(
-                        f'Transcription completed in {transcription_time:.2f} seconds on attempt {attempt}. Post-processed line: {result}'
+                        f'Transcription attempt {attempt} failed after {transcription_time:.2f} seconds.'
                     )
-                    break
-                ConfigManager.console_print(
-                    f'Transcription attempt {attempt} failed after {transcription_time:.2f} seconds.'
-                )
+                except Exception as e:
+                    ConfigManager.console_print(
+                        f'Transcription attempt {attempt} raised an exception: {e}'
+                    )
+                # Pause briefly before the next retry
+                if attempt < attempts:
+                    time.sleep(1)
 
             if not result:
                 file_path = self._save_failed_audio(audio_data)
