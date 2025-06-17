@@ -101,10 +101,9 @@ class ResultThread(QThread):
             result = ''
             attempts = 3
             for attempt in range(1, attempts + 1):
-                try:
-                    start_time = time.time()
-                    result = transcribe(audio_data, self.local_model)
-                    end_time = time.time()
+                start_time = time.time()
+                result = transcribe(audio_data, self.local_model)
+                end_time = time.time()
 
                     transcription_time = end_time - start_time
                     if result and result.strip():
