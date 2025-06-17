@@ -5,6 +5,8 @@ import sounddevice as sd
 import tempfile
 import wave
 import webrtcvad
+import os
+import soundfile as sf
 from PyQt5.QtCore import QThread, QMutex, pyqtSignal
 from collections import deque
 from threading import Event
@@ -96,13 +98,38 @@ class ResultThread(QThread):
             self.statusSignal.emit('transcribing', self.use_llm)
             ConfigManager.console_print('Transcribing...')
 
-            # Time the transcription process
-            start_time = time.time()
-            result = transcribe(audio_data, self.local_model)
-            end_time = time.time()
+            result = ''
+            attempts = 3
+            for attempt in range(1, attempts + 1):
+                try:
+                    start_time = time.time()
+                    result = transcribe(audio_data, self.local_model)
+                    end_time = time.time()
 
-            transcription_time = end_time - start_time
-            ConfigManager.console_print(f'Transcription completed in {transcription_time:.2f} seconds. Post-processed line: {result}')
+                    transcription_time = end_time - start_time
+                    if result and result.strip():
+                        ConfigManager.console_print(
+                            f'Transcription completed in {transcription_time:.2f} seconds on attempt {attempt}. Post-processed line: {result}'
+                        )
+                        break
+                    ConfigManager.console_print(
+                        f'Transcription attempt {attempt} failed after {transcription_time:.2f} seconds.'
+                    )
+                except Exception as e:
+                    ConfigManager.console_print(
+                        f'Transcription attempt {attempt} raised an exception: {e}'
+                    )
+                # Pause briefly before the next retry
+                if attempt < attempts:
+                    time.sleep(1)
+
+            if not result:
+                file_path = self._save_failed_audio(audio_data)
+                ConfigManager.console_print(
+                    f'All {attempts} transcription attempts failed. Audio saved to: {file_path}'
+                )
+                self.statusSignal.emit('transcription_failed', self.use_llm)
+                return
 
             if not self.is_running:
                 return
@@ -125,6 +152,19 @@ class ResultThread(QThread):
             self.resultSignal.emit('')
         finally:
             self.is_transcribing = False  # Ensure flag is reset
+
+    def _save_failed_audio(self, audio_data):
+        """Save failed audio to a FLAC file for later retry."""
+        try:
+            save_dir = os.path.join(os.path.expanduser('~'), '.whisperwriter', 'failed_audio')
+            os.makedirs(save_dir, exist_ok=True)
+            timestamp = time.strftime('%Y%m%d-%H%M%S')
+            file_path = os.path.join(save_dir, f'failed_{timestamp}.flac')
+            sf.write(file_path, audio_data, self.sample_rate, format='FLAC')
+            return file_path
+        except Exception as e:
+            ConfigManager.console_print(f'Failed to save audio: {e}')
+            return ''
 
     def _record_audio(self):
         """
