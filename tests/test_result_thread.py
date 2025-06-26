@@ -26,17 +26,37 @@ def setup_thread(monkeypatch):
     transcribe_mock = MagicMock(return_value='')
     monkeypatch.setitem(sys.modules, 'transcription', types.SimpleNamespace(transcribe=transcribe_mock))
 
+    # Mock ConfigManager
+    class MockConfigManager:
+        _instance = None
+        
+        @classmethod
+        def initialize(cls, schema_path=None):
+            cls._instance = cls()
+        
+        @staticmethod
+        def console_print(msg):
+            print(f"[TEST LOG] {msg}")
+        
+        @staticmethod
+        def get_config_value(section, key, default=None):
+            return False
+        
+        @staticmethod
+        def get_config_section(section):
+            return {'sample_rate': 16000}
+
+    monkeypatch.setitem(sys.modules, 'utils', types.SimpleNamespace(ConfigManager=MockConfigManager))
+
     # Ensure fresh import of ResultThread for each test
     if 'result_thread' in sys.modules:
         del sys.modules['result_thread']
 
     sys.path.insert(0, 'src')
     from result_thread import ResultThread, time as rt_time
-    from utils import ConfigManager
 
-    # Ensure fresh ConfigManager
-    ConfigManager._instance = None
-    ConfigManager.initialize('src/config_schema.yaml')
+    # Initialize mock ConfigManager
+    MockConfigManager.initialize('src/config_schema.yaml')
 
     thread = ResultThread()
     statuses = []

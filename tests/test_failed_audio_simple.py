@@ -5,94 +5,119 @@ from unittest.mock import MagicMock, patch
 def test_save_failed_audio_validation():
     """Test that audio data validation works correctly"""
     
-    # Mock dependencies
-    sys.modules['sounddevice'] = types.SimpleNamespace(InputStream=None)
-    sys.modules['webrtcvad'] = types.SimpleNamespace(Vad=lambda mode: None)
-    sys.modules['soundfile'] = MagicMock()
+    # Store original modules to restore later
+    original_modules = {}
+    modules_to_restore = ['sounddevice', 'webrtcvad', 'soundfile', 'media_controller', 'transcription', 'utils']
+    for module in modules_to_restore:
+        if module in sys.modules:
+            original_modules[module] = sys.modules[module]
     
-    class DummyMediaController:
-        def __init__(self):
-            self.was_playing = False
-        def pause_media(self):
-            pass
-        def resume_media(self):
-            pass
-    
-    sys.modules['media_controller'] = types.SimpleNamespace(MediaController=DummyMediaController)
-    sys.modules['transcription'] = types.SimpleNamespace(transcribe=MagicMock(return_value=''))
-    
-    # Mock ConfigManager
-    messages = []
-    class MockConfigManager:
-        @staticmethod
-        def console_print(msg):
-            messages.append(msg)
-            print(f"[TEST LOG] {msg}")
+    try:
+        # Mock dependencies
+        sys.modules['sounddevice'] = types.SimpleNamespace(InputStream=None)
+        sys.modules['webrtcvad'] = types.SimpleNamespace(Vad=lambda mode: None)
+        sys.modules['soundfile'] = MagicMock()
         
-        @staticmethod
-        def get_config_value(section, key, default=None):
-            return False
+        class DummyMediaController:
+            def __init__(self):
+                self.was_playing = False
+            def pause_media(self):
+                pass
+            def resume_media(self):
+                pass
         
-        @staticmethod
-        def get_config_section(section):
-            return {'sample_rate': 16000}
-    
-    sys.modules['utils'] = types.SimpleNamespace(ConfigManager=MockConfigManager)
-    
-    # Import after mocking
-    sys.path.insert(0, 'src')
-    from result_thread import ResultThread
-    
-    # Test 1: None audio data
-    print("Test 1: None audio data")
-    messages.clear()
-    thread = ResultThread()
-    thread.sample_rate = 16000
-    result = thread._save_failed_audio(None)
-    assert result == '', f"Expected empty string, got: {result}"
-    assert any('audio_data is None' in msg for msg in messages), f"Expected None message, got: {messages}"
-    print("✓ None audio data test passed")
-    
-    # Test 2: Empty audio data
-    print("Test 2: Empty audio data")
-    messages.clear()
-    result = thread._save_failed_audio([])
-    assert result == '', f"Expected empty string, got: {result}"
-    assert any('audio_data is empty' in msg for msg in messages), f"Expected empty message, got: {messages}"
-    print("✓ Empty audio data test passed")
-    
-    # Test 3: No sample rate
-    print("Test 3: No sample rate")
-    messages.clear()
-    thread_no_rate = ResultThread()
-    # Don't set sample_rate
-    result = thread_no_rate._save_failed_audio([1, 2, 3])
-    assert result == '', f"Expected empty string, got: {result}"
-    assert any('sample_rate is not set' in msg for msg in messages), f"Expected sample_rate message, got: {messages}"
-    print("✓ No sample rate test passed")
-    
-    # Test 4: Valid data (mocked save)
-    print("Test 4: Valid data")
-    messages.clear()
-    thread.sample_rate = 16000
-    valid_audio = [1, 2, 3, 4, 5]  # Simple list representing audio data
-    
-    with patch('soundfile.write') as mock_write:
-        with patch('os.makedirs') as mock_makedirs:
-            with patch('time.strftime', return_value='20240101-120000'):
-                result = thread._save_failed_audio(valid_audio)
-                
-                # Should return a file path
-                assert result != '', f"Expected non-empty path, got: {result}"
-                assert 'failed_20240101-120000.flac' in result, f"Expected filename in path: {result}"
-                assert mock_write.called, "Expected sf.write to be called"
-                
-                # Check for success message
-                assert any('Successfully saved' in msg for msg in messages), f"Expected success message, got: {messages}"
-    
-    print("✓ Valid data test passed")
-    
-    print("All validation tests passed!")
+        sys.modules['media_controller'] = types.SimpleNamespace(MediaController=DummyMediaController)
+        sys.modules['transcription'] = types.SimpleNamespace(transcribe=MagicMock(return_value=''))
+        
+        # Mock ConfigManager with message capture
+        messages = []
+        class MockConfigManager:
+            @staticmethod
+            def console_print(msg):
+                messages.append(msg)
+                print(f"[TEST LOG] {msg}")
+            
+            @staticmethod
+            def get_config_value(section, key, default=None):
+                return False
+            
+            @staticmethod
+            def get_config_section(section):
+                return {'sample_rate': 16000}
+        
+        sys.modules['utils'] = types.SimpleNamespace(ConfigManager=MockConfigManager)
+        
+        # Clear any cached imports
+        if 'result_thread' in sys.modules:
+            del sys.modules['result_thread']
+            
+        # Import after mocking
+        sys.path.insert(0, 'src')
+        from result_thread import ResultThread
+        
+        # Test 1: None audio data
+        print("Test 1: None audio data")
+        messages.clear()
+        thread = ResultThread()
+        thread.sample_rate = 16000
+        result = thread._save_failed_audio(None)
+        assert result == '', f"Expected empty string, got: {result}"
+        assert any('audio_data is None' in msg for msg in messages), f"Expected None message, got: {messages}"
+        print("✓ None audio data test passed")
+        
+        # Test 2: Empty audio data
+        print("Test 2: Empty audio data")
+        messages.clear()
+        result = thread._save_failed_audio([])
+        assert result == '', f"Expected empty string, got: {result}"
+        assert any('audio_data is empty' in msg for msg in messages), f"Expected empty message, got: {messages}"
+        print("✓ Empty audio data test passed")
+        
+        # Test 3: No sample rate
+        print("Test 3: No sample rate")
+        messages.clear()
+        thread_no_rate = ResultThread()
+        # Don't set sample_rate
+        result = thread_no_rate._save_failed_audio([1, 2, 3])
+        assert result == '', f"Expected empty string, got: {result}"
+        assert any('sample_rate is not set' in msg for msg in messages), f"Expected sample_rate message, got: {messages}"
+        print("✓ No sample rate test passed")
+        
+        # Test 4: Valid data (mocked save)
+        print("Test 4: Valid data")
+        messages.clear()
+        thread.sample_rate = 16000
+        valid_audio = [1, 2, 3, 4, 5]  # Simple list representing audio data
+        
+        with patch('soundfile.write') as mock_write:
+            with patch('os.makedirs') as mock_makedirs:
+                with patch('time.strftime', return_value='20240101-120000'):
+                    result = thread._save_failed_audio(valid_audio)
+                    
+                    # Should return a file path
+                    assert result != '', f"Expected non-empty path, got: {result}"
+                    assert 'failed_20240101-120000.flac' in result, f"Expected filename in path: {result}"
+                    assert mock_write.called, "Expected sf.write to be called"
+                    
+                    # Check for success message
+                    assert any('Successfully saved' in msg for msg in messages), f"Expected success message, got: {messages}"
+        
+        print("✓ Valid data test passed")
+        print("All validation tests passed!")
+        
+    finally:
+        # Restore original modules
+        for module, original in original_modules.items():
+            sys.modules[module] = original
+        
+        # Remove mocked modules that weren't there originally
+        for module in modules_to_restore:
+            if module not in original_modules and module in sys.modules:
+                del sys.modules[module]
+        
+        # Remove from path
+        if 'src' in sys.path:
+            sys.path.remove('src')
 
 if __name__ == '__main__':
     print("Running simplified failed audio saving tests...")
