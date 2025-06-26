@@ -169,8 +169,8 @@ class ResultThread(QThread):
             ConfigManager.console_print('Failed to save audio: audio_data is empty')
             return ''
         
-        if not hasattr(self, 'sample_rate') or self.sample_rate is None:
-            ConfigManager.console_print('Failed to save audio: sample_rate is not set')
+        if not hasattr(self, 'sample_rate') or self.sample_rate is None or self.sample_rate <= 0:
+            ConfigManager.console_print('Failed to save audio: sample_rate is not set or invalid')
             return ''
             
         try:
