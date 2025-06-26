@@ -123,11 +123,16 @@ class ResultThread(QThread):
                 if attempt < attempts:
                     time.sleep(1)
 
-            if not result:
+            if not result or not result.strip():
                 file_path = self._save_failed_audio(audio_data)
-                ConfigManager.console_print(
-                    f'All {attempts} transcription attempts failed. Audio saved to: {file_path}'
-                )
+                if file_path:
+                    ConfigManager.console_print(
+                        f'All {attempts} transcription attempts failed. Audio saved to: {file_path}'
+                    )
+                else:
+                    ConfigManager.console_print(
+                        f'All {attempts} transcription attempts failed. Additionally, failed to save audio file for later retry.'
+                    )
                 self.statusSignal.emit('transcription_failed', self.use_llm)
                 return
 
@@ -155,15 +160,31 @@ class ResultThread(QThread):
 
     def _save_failed_audio(self, audio_data):
         """Save failed audio to a FLAC file for later retry."""
+        # Validate inputs before attempting to save
+        if audio_data is None:
+            ConfigManager.console_print('Failed to save audio: audio_data is None')
+            return ''
+            
+        if len(audio_data) == 0:
+            ConfigManager.console_print('Failed to save audio: audio_data is empty')
+            return ''
+        
+        if not hasattr(self, 'sample_rate') or self.sample_rate is None or self.sample_rate <= 0:
+            ConfigManager.console_print('Failed to save audio: sample_rate is not set or invalid')
+            return ''
+            
         try:
             save_dir = os.path.join(os.path.expanduser('~'), '.whisperwriter', 'failed_audio')
             os.makedirs(save_dir, exist_ok=True)
             timestamp = time.strftime('%Y%m%d-%H%M%S')
             file_path = os.path.join(save_dir, f'failed_{timestamp}.flac')
+            
+            ConfigManager.console_print(f'Attempting to save audio data (size: {len(audio_data)} samples, sample_rate: {self.sample_rate}Hz) to: {file_path}')
             sf.write(file_path, audio_data, self.sample_rate, format='FLAC')
+            ConfigManager.console_print(f'Successfully saved failed audio to: {file_path}')
             return file_path
         except Exception as e:
-            ConfigManager.console_print(f'Failed to save audio: {e}')
+            ConfigManager.console_print(f'Failed to save audio file: {e}')
             return ''
 
     def _record_audio(self):

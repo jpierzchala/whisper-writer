@@ -439,15 +439,15 @@ def post_process_transcription(transcription):
     
     # Load and apply find/replace rules
     rules_file = ConfigManager.get_config_value('post_processing', 'find_replace_file')
-    print(f"Find/replace file path: {rules_file}")  # Debug print
     if rules_file:
-        print(f"Loading rules from: {rules_file}")
-        if os.path.exists(rules_file):  # Debug print
-            print(f"File exists at: {rules_file}")
+        ConfigManager.console_print(f"Find/replace file path: {rules_file}")
+        ConfigManager.console_print(f"Loading rules from: {rules_file}")
+        if os.path.exists(rules_file):
+            ConfigManager.console_print(f"File exists at: {rules_file}")
         else:
-            print(f"File not found at: {rules_file}")
+            ConfigManager.console_print(f"File not found at: {rules_file}")
         rules = TextProcessor.load_find_replace_rules(rules_file)
-        print(f"Loaded rules: {rules}")  # Debug print
+        ConfigManager.console_print(f"Loaded rules: {rules}")
         transcription = TextProcessor.apply_find_replace_rules(transcription, rules)
     
     # Apply other post-processing options
