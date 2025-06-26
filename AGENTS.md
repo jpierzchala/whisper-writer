@@ -84,13 +84,33 @@ If tests are failing:
 3. Re-run tests to confirm fix
 4. Only then consider the work complete
 
-## Environment Setup
-Ensure pytest is installed:
+## 🔧 Environment Setup
+
+**CRITICAL**: Before starting any work, install project dependencies to avoid import errors during testing.
+
+### Recommended Installation Method
 ```bash
-pip install pytest
+# Try to install the full project (may fail on some platforms due to OS-specific deps)
+pip install .
 ```
 
-The project uses `pyproject.toml` which includes pytest as a dependency.
+### If Full Installation Fails
+Install core dependencies needed for development and testing:
+```bash
+pip install pytest openai requests PyYAML numpy black flake8
+```
+
+### Why This Is Essential
+- **Missing modules cause test failures**: AI agents often encounter `ModuleNotFoundError` when trying to run tests
+- **pyproject.toml includes all dependencies**: The project correctly defines all necessary modules
+- **Platform-specific dependencies may fail**: Some dependencies (like `pywin32`) are OS-specific and may cause installation errors on non-Windows systems
+- **Core dependencies are sufficient for most work**: For testing and basic development, the core dependencies listed above are adequate
+
+### Verification
+After installation, verify core modules are available:
+```bash
+python -c "import pytest, openai, requests, yaml, numpy; print('Core dependencies available')"
+```
 
 ---
 
