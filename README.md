@@ -185,13 +185,18 @@ The first time you open the app, if a configuration file doesn't exist, a Settin
   - `initial_prompt`: A string used as an initial prompt to condition the transcription. More info: [OpenAI Prompting Guide](https://platform.openai.com/docs/guides/speech-to-text/prompting). (Default: `null`)
 
 - `api`: Configuration options for the OpenAI API. See the [OpenAI API documentation](https://platform.openai.com/docs/api-reference/audio/create?lang=python) for more information.
-  - `provider`: The provider to use for transcription. Current options include `openai`, `deepgram`, and `groq`. (Default: `openai`)
+  - `provider`: The provider to use for transcription. Current options include `openai`, `azure_openai`, `deepgram`, and `groq`. (Default: `openai`)
   - `model`: The model to use for transcription. Supported models:
     - OpenAI: `whisper-1`
+    - Azure OpenAI: `whisper-1` (or your custom deployment name)
     - Deepgram: `nova-3` and `nova-2`
     - Groq: `whisper-large-v3-turbo`, `distil-whisper-large-v3-en`, and `whisper-large-v3`
   - `base_url`: The base URL for the API. Can be changed to use a local API endpoint, such as [LocalAI](https://localai.io/). (Default: `https://api.openai.com/v1`)
   - `openai_transcription_key`: Your API key for the OpenAI API. Required for OpenAI transcription. (Default: `null`)
+  - `azure_openai_api_key`: Your API key for the Azure OpenAI service. Required for Azure OpenAI transcription. (Default: `null`)
+  - `azure_openai_endpoint`: Your Azure OpenAI endpoint URL (e.g., `https://your-resource.openai.azure.com`). Required for Azure OpenAI transcription. (Default: `null`)
+  - `azure_openai_api_version`: The API version to use for Azure OpenAI service. (Default: `2024-02-01`)
+  - `azure_openai_deployment_name`: The deployment name for your Azure OpenAI Whisper model. Required for Azure OpenAI transcription. (Default: `null`)
   - `deepgram_transcription_key`: Your API key for the Deepgram API. Required for Deepgram transcription. (Default: `null`)
   - `groq_transcription_key`: Your API key for the Groq API. Required for Groq transcription. (Default: `null`)
 
@@ -254,6 +259,21 @@ When specifying a model, use the official model name as it's listed in the API p
 - `pause_media_while_recording`: Set to `true` to pause audio while recording. (Default: `false`)
 
 If any of the configuration options are invalid or not provided, the program will use the default values.
+
+### Azure OpenAI Setup
+
+To use Azure OpenAI with WhisperWriter, you'll need to:
+
+1. **Create an Azure OpenAI resource** in the Azure portal
+2. **Deploy a Whisper model** in your Azure OpenAI resource
+3. **Configure WhisperWriter** with your Azure OpenAI credentials:
+   - Set `provider` to `azure_openai`
+   - Set `azure_openai_api_key` to your Azure OpenAI API key
+   - Set `azure_openai_endpoint` to your Azure OpenAI endpoint URL (e.g., `https://your-resource.openai.azure.com`)
+   - Set `azure_openai_deployment_name` to your Whisper model deployment name
+   - Optionally set `azure_openai_api_version` (defaults to `2024-02-01`)
+
+The model name should typically be `whisper-1` unless you're using a custom deployment name.
 
 Check out the [CHANGELOG](CHANGELOG.md) for more details on what's been added and changed.
 

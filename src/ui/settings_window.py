@@ -62,6 +62,10 @@ class SettingsWindow(BaseWindow):
         if self.use_api_checkbox:
             self.use_api_checkbox.stateChanged.connect(lambda: self.toggle_api_local_options(self.use_api_checkbox.isChecked()))
             self.toggle_api_local_options(self.use_api_checkbox.isChecked())
+        
+        # Initialize provider-specific option visibility
+        self.toggle_llm_provider_options()
+        self.toggle_transcription_provider_options()
 
     def create_tabs(self):
         """Create tabs for each category in the schema."""
@@ -276,6 +280,7 @@ class SettingsWindow(BaseWindow):
                 widget = self.create_combobox(current_value, meta['options'])
                 widget.setObjectName('llm_post_processing_api_type_input')
                 widget.currentTextChanged.connect(self.refresh_model_choices)
+                widget.currentTextChanged.connect(self.toggle_llm_provider_options)
                 return widget
             elif key in ['cleanup_model', 'instruction_model']:
                 widget = QLineEdit(current_value or '')
@@ -291,7 +296,11 @@ class SettingsWindow(BaseWindow):
         if meta_type == 'bool':
             return self.create_checkbox(current_value, key)
         elif meta_type == 'str' and 'options' in meta:
-            return self.create_combobox(current_value, meta['options'])
+            widget = self.create_combobox(current_value, meta['options'])
+            # Add special handling for provider combo boxes
+            if key == 'provider':
+                widget.currentTextChanged.connect(self.toggle_transcription_provider_options)
+            return widget
         elif meta_type == 'str':
             is_api_key = key.endswith('api_key')
             return self.create_line_edit(current_value, key, is_api_key)
@@ -324,6 +333,10 @@ class SettingsWindow(BaseWindow):
                 widget.setText(KeyringManager.get_api_key("deepgram_transcription") or value)
             elif key == 'groq_transcription_api_key':
                 widget.setText(KeyringManager.get_api_key("groq_transcription") or value)
+            elif key == 'azure_openai_api_key':
+                widget.setText(KeyringManager.get_api_key("azure_openai_transcription") or value)
+            elif key == 'azure_openai_llm_api_key':
+                widget.setText(KeyringManager.get_api_key("azure_openai_llm") or value)
             elif key == 'claude_api_key':
                 widget.setText(KeyringManager.get_api_key("claude") or value)
             elif key == 'openai_api_key':
@@ -370,8 +383,10 @@ class SettingsWindow(BaseWindow):
         openai_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'openai_transcription_api_key') or ''
         deepgram_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'deepgram_transcription_api_key') or ''
         groq_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'groq_transcription_api_key') or ''
+        azure_openai_key = ConfigManager.get_config_value('model_options', 'api', 'azure_openai_api_key') or ''
         claude_api_key = ConfigManager.get_config_value('llm_post_processing', 'claude_api_key') or ''
         openai_llm_key = ConfigManager.get_config_value('llm_post_processing', 'openai_api_key') or ''
+        azure_openai_llm_key = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_api_key') or ''
         gemini_api_key = ConfigManager.get_config_value('llm_post_processing', 'gemini_api_key') or ''
         groq_api_key = ConfigManager.get_config_value('llm_post_processing', 'groq_api_key') or ''
         
@@ -379,8 +394,10 @@ class SettingsWindow(BaseWindow):
         KeyringManager.save_api_key("openai_transcription", openai_transcription_key)
         KeyringManager.save_api_key("deepgram_transcription", deepgram_transcription_key)
         KeyringManager.save_api_key("groq_transcription", groq_transcription_key)
+        KeyringManager.save_api_key("azure_openai_transcription", azure_openai_key)
         KeyringManager.save_api_key("claude", claude_api_key)
         KeyringManager.save_api_key("openai_llm", openai_llm_key)
+        KeyringManager.save_api_key("azure_openai_llm", azure_openai_llm_key)
         KeyringManager.save_api_key("gemini", gemini_api_key)
         KeyringManager.save_api_key("groq", groq_api_key)
         
@@ -388,8 +405,10 @@ class SettingsWindow(BaseWindow):
         ConfigManager.set_config_value(None, 'model_options', 'api', 'openai_transcription_api_key')
         ConfigManager.set_config_value(None, 'model_options', 'api', 'deepgram_transcription_api_key')
         ConfigManager.set_config_value(None, 'model_options', 'api', 'groq_transcription_api_key')
+        ConfigManager.set_config_value(None, 'model_options', 'api', 'azure_openai_api_key')
         ConfigManager.set_config_value(None, 'llm_post_processing', 'claude_api_key')
         ConfigManager.set_config_value(None, 'llm_post_processing', 'openai_api_key')
+        ConfigManager.set_config_value(None, 'llm_post_processing', 'azure_openai_llm_api_key')
         ConfigManager.set_config_value(None, 'llm_post_processing', 'gemini_api_key')
         ConfigManager.set_config_value(None, 'llm_post_processing', 'groq_api_key')
 
@@ -704,9 +723,9 @@ class SettingsWindow(BaseWindow):
             
             ConfigManager.console_print(f"\nUpdating combo box: {combo.objectName()}")
             ConfigManager.console_print(f"Combo box exists: {combo is not None}")
-            ConfigManager.console_print(f"Combo box visible: {combo.isVisible()}")
-            ConfigManager.console_print(f"Combo box enabled: {combo.isEnabled()}")
-            ConfigManager.console_print(f"Current items: {[combo.itemText(i) for i in range(combo.count())]}")
+            ConfigManager.console.print(f"Combo box visible: {combo.isVisible()}")
+            ConfigManager.console.print(f"Combo box enabled: {combo.isEnabled()}")
+            ConfigManager.console.print(f"Current items: {[combo.itemText(i) for i in range(combo.count())]}")
             
             # Store current state
             was_enabled = combo.isEnabled()
@@ -749,8 +768,8 @@ class SettingsWindow(BaseWindow):
             ConfigManager.console_print(f"Final state - count: {combo.count()}")
             ConfigManager.console_print(f"Final items: {[combo.itemText(i) for i in range(combo.count())]}")
             ConfigManager.console_print(f"Current text: {combo.currentText()}")
-            ConfigManager.console_print(f"Enabled: {combo.isEnabled()}")
-            ConfigManager.console_print(f"Visible: {combo.isVisible()}")
+            ConfigManager.console.print(f"Enabled: {combo.isEnabled()}")
+            ConfigManager.console.print(f"Visible: {combo.isVisible()}")
         
         # Force a UI update
         QApplication.processEvents()
@@ -820,3 +839,104 @@ class SettingsWindow(BaseWindow):
         )
         if file_path:
             file_edit.setText(file_path)
+
+    def toggle_llm_provider_options(self, provider=None):
+        """Toggle visibility of LLM provider-specific options based on selected provider."""
+        if provider is None:
+            api_type_combo = self.findChild(QComboBox, 'llm_post_processing_api_type_input')
+            if api_type_combo:
+                provider = api_type_combo.currentText()
+            else:
+                return
+        
+        ConfigManager.console_print(f"Toggling LLM provider options for: {provider}")
+        
+        # Map of provider to their specific API key fields
+        provider_fields = {
+            'chatgpt': ['openai_api_key'],
+            'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint', 
+                           'azure_openai_llm_deployment_name', 'azure_openai_llm_api_version'],
+            'claude': ['claude_api_key'],
+            'gemini': ['gemini_api_key'],
+            'groq': ['groq_api_key'],
+            'ollama': []  # No API key needed for Ollama
+        }
+        
+        # Hide all provider-specific fields first
+        all_fields = []
+        for fields in provider_fields.values():
+            all_fields.extend(fields)
+        
+        for field in all_fields:
+            widget = self.findChild(QWidget, f'llm_post_processing_{field}_input')
+            label = self.findChild(QLabel, f'llm_post_processing_{field}_label')
+            help_button = self.findChild(QToolButton, f'llm_post_processing_{field}_help')
+            
+            if widget:
+                widget.setVisible(False)
+            if label:
+                label.setVisible(False)
+            if help_button:
+                help_button.setVisible(False)
+        
+        # Show only the fields for the selected provider
+        if provider in provider_fields:
+            for field in provider_fields[provider]:
+                widget = self.findChild(QWidget, f'llm_post_processing_{field}_input')
+                label = self.findChild(QLabel, f'llm_post_processing_{field}_label')
+                help_button = self.findChild(QToolButton, f'llm_post_processing_{field}_help')
+                
+                if widget:
+                    widget.setVisible(True)
+                    ConfigManager.console_print(f"Showing widget for {field}")
+                if label:
+                    label.setVisible(True)
+                if help_button:
+                    help_button.setVisible(True)
+        
+        ConfigManager.console_print(f"Finished toggling options for provider: {provider}")
+
+    def toggle_transcription_provider_options(self, provider=None):
+        """Toggle visibility of transcription provider-specific options."""
+        if provider is None:
+            provider_combo = self.findChild(QComboBox, 'model_options_api_provider_input')
+            if provider_combo:
+                provider = provider_combo.currentText()
+            else:
+                return
+        
+        ConfigManager.console_print(f"Toggling transcription provider options for: {provider}")
+        
+        # Map of provider to their specific fields
+        provider_fields = {
+            'openai': ['openai_transcription_api_key'],
+            'azure_openai': ['azure_openai_api_key', 'azure_openai_endpoint', 
+                           'azure_openai_deployment_name', 'azure_openai_api_version'],
+            'deepgram': ['deepgram_transcription_api_key'],
+            'groq': ['groq_transcription_api_key']
+        }
+        
+        # Hide all provider-specific fields first
+        all_fields = []
+        for fields in provider_fields.values():
+            all_fields.extend(fields)
+        
+        for field in all_fields:
+            widget = self.findChild(QWidget, f'model_options_api_{field}_input')
+            label = self.findChild(QLabel, f'model_options_api_{field}_label')
+            help_button = self.findChild(QToolButton, f'model_options_api_{field}_help')
+            
+            if widget:
+                widget.setVisible(False)
+            if label:
+                label.setVisible(False)
+            if help_button:
+                help_button.setVisible(False)
+        
+        # Show only the fields for the selected provider
+        if provider in provider_fields:
+            for field in provider_fields[provider]:
+                widget = self.findChild(QWidget, f'model_options_api_{field}_input')
+                label = self.findChild(QLabel, f'model_options_api_{field}_label')
+                help_button = self.findChild(QToolButton, f'model_options_api_{field}_help')
+                
