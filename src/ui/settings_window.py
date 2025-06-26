@@ -324,6 +324,8 @@ class SettingsWindow(BaseWindow):
                 widget.setText(KeyringManager.get_api_key("deepgram_transcription") or value)
             elif key == 'groq_transcription_api_key':
                 widget.setText(KeyringManager.get_api_key("groq_transcription") or value)
+            elif key == 'azure_openai_api_key':
+                widget.setText(KeyringManager.get_api_key("azure_openai_transcription") or value)
             elif key == 'claude_api_key':
                 widget.setText(KeyringManager.get_api_key("claude") or value)
             elif key == 'openai_api_key':
@@ -370,6 +372,7 @@ class SettingsWindow(BaseWindow):
         openai_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'openai_transcription_api_key') or ''
         deepgram_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'deepgram_transcription_api_key') or ''
         groq_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'groq_transcription_api_key') or ''
+        azure_openai_key = ConfigManager.get_config_value('model_options', 'api', 'azure_openai_api_key') or ''
         claude_api_key = ConfigManager.get_config_value('llm_post_processing', 'claude_api_key') or ''
         openai_llm_key = ConfigManager.get_config_value('llm_post_processing', 'openai_api_key') or ''
         gemini_api_key = ConfigManager.get_config_value('llm_post_processing', 'gemini_api_key') or ''
@@ -379,6 +382,7 @@ class SettingsWindow(BaseWindow):
         KeyringManager.save_api_key("openai_transcription", openai_transcription_key)
         KeyringManager.save_api_key("deepgram_transcription", deepgram_transcription_key)
         KeyringManager.save_api_key("groq_transcription", groq_transcription_key)
+        KeyringManager.save_api_key("azure_openai_transcription", azure_openai_key)
         KeyringManager.save_api_key("claude", claude_api_key)
         KeyringManager.save_api_key("openai_llm", openai_llm_key)
         KeyringManager.save_api_key("gemini", gemini_api_key)
@@ -388,6 +392,7 @@ class SettingsWindow(BaseWindow):
         ConfigManager.set_config_value(None, 'model_options', 'api', 'openai_transcription_api_key')
         ConfigManager.set_config_value(None, 'model_options', 'api', 'deepgram_transcription_api_key')
         ConfigManager.set_config_value(None, 'model_options', 'api', 'groq_transcription_api_key')
+        ConfigManager.set_config_value(None, 'model_options', 'api', 'azure_openai_api_key')
         ConfigManager.set_config_value(None, 'llm_post_processing', 'claude_api_key')
         ConfigManager.set_config_value(None, 'llm_post_processing', 'openai_api_key')
         ConfigManager.set_config_value(None, 'llm_post_processing', 'gemini_api_key')
