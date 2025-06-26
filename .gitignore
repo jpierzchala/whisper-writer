@@ -141,5 +141,8 @@ config.yaml
 *.db
 /keyring/*
 
+# VS Code workspace files
+*.code-workspace
+
 # Prompts
 *.txt
