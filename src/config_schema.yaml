@@ -245,6 +245,7 @@ llm_post_processing:
     description: "The LLM API to use for post-processing. If Ollama is selected, local LLM processing will be used. Ollama must be installed separately."
     options:
       - chatgpt
+      - azure_openai
       - claude
       - gemini
       - groq
@@ -259,6 +260,26 @@ llm_post_processing:
     value: null
     type: str
     description: "API key for OpenAI (ChatGPT)"
+    
+  azure_openai_llm_api_key:
+    value: null
+    type: str
+    description: "API key for Azure OpenAI LLM service"
+    
+  azure_openai_llm_endpoint:
+    value: null
+    type: str
+    description: "Azure OpenAI endpoint for LLM service (e.g., https://your-resource.openai.azure.com)"
+    
+  azure_openai_llm_deployment_name:
+    value: null
+    type: str
+    description: "Deployment name for Azure OpenAI LLM model"
+    
+  azure_openai_llm_api_version:
+    value: "2024-02-01"
+    type: str
+    description: "API version for Azure OpenAI LLM service"
     
   gemini_api_key:
     value: null
