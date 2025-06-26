@@ -268,7 +268,7 @@ def transcribe_local(audio_data, local_model=None):
         return ''.join([segment.text for segment in list(response[0])])
 
 def transcribe_api(audio_data):
-    """Transcribe audio using an API service (OpenAI, Deepgram, or Groq)."""
+    """Transcribe audio using an API service (OpenAI, Azure OpenAI, Deepgram, or Groq)."""
     api_options = ConfigManager.get_config_section('model_options')['api']
     provider = api_options['provider']
     model = api_options['model']
@@ -278,6 +278,8 @@ def transcribe_api(audio_data):
     
     if provider == 'openai':
         return transcribe_with_openai(audio_data, api_options)
+    elif provider == 'azure_openai':
+        return transcribe_with_azure_openai(audio_data, api_options)
     elif provider == 'deepgram':
         return transcribe_with_deepgram(audio_data, api_options)
     elif provider == 'groq':
@@ -332,6 +334,77 @@ def transcribe_with_openai(audio_data, api_options):
             
     except Exception as e:
         ConfigManager.console_print(f"Error transcribing with OpenAI: {str(e)}")
+        return ''
+
+def transcribe_with_azure_openai(audio_data, api_options):
+    """Transcribe audio using Azure OpenAI's Whisper API."""
+    try:
+        api_key = KeyringManager.get_api_key("azure_openai_transcription")
+        if not api_key:
+            ConfigManager.console_print("Azure OpenAI API key not found in keyring")
+            return ''
+            
+        # Get Azure OpenAI specific configuration
+        endpoint = api_options.get('azure_openai_endpoint')
+        api_version = api_options.get('azure_openai_api_version', '2024-02-01')
+        deployment_name = api_options.get('azure_openai_deployment_name')
+        
+        if not endpoint:
+            ConfigManager.console_print("Azure OpenAI endpoint not configured")
+            return ''
+            
+        if not deployment_name:
+            ConfigManager.console_print("Azure OpenAI deployment name not configured")
+            return ''
+            
+        # Construct Azure OpenAI URL  
+        base_url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment_name}/audio/transcriptions"
+        ConfigManager.console_print(f"Using Azure OpenAI endpoint: {base_url}")
+        
+        headers = {
+            "api-key": api_key,
+            "Content-Type": "multipart/form-data"
+        }
+        
+        # Convert audio to WAV file
+        byte_io = io.BytesIO()
+        sf.write(byte_io, audio_data, 16000, format='wav')
+        byte_io.seek(0)
+        
+        model = api_options['model']
+
+        files = {
+            'file': ('audio.wav', byte_io, 'audio/wav'),
+        }
+        
+        data = {
+            'model': model,
+        }
+        
+        params = {
+            'api-version': api_version
+        }
+        
+        ConfigManager.console_print(f"Sending request to Azure OpenAI API using {model}...")
+        response = requests.post(
+            base_url,
+            headers={'api-key': api_key},  # Simplified headers for Azure OpenAI
+            files=files,
+            data=data,
+            params=params
+        )
+        
+        if response.status_code == 200:
+            result = response.json()['text']
+            ConfigManager.console_print("Azure OpenAI API request successful")
+            ConfigManager.console_print(f"Transcription: {result}")
+            return result
+        else:
+            ConfigManager.console_print(f"Azure OpenAI API error: {response.text}")
+            return ''
+            
+    except Exception as e:
+        ConfigManager.console_print(f"Error transcribing with Azure OpenAI: {str(e)}")
         return ''
 
 def transcribe_with_deepgram(audio_data, api_options):

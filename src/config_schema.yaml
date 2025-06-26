@@ -25,9 +25,10 @@ model_options:
     provider:
       value: openai
       type: str
-      description: "The provider to use for transcription. Options include OpenAI and Deepgram."
+      description: "The provider to use for transcription. Options include OpenAI, Azure OpenAI, Deepgram, and Groq."
       options:
         - openai
+        - azure_openai
         - deepgram
         - groq
     model:
@@ -54,6 +55,22 @@ model_options:
       value: null
       type: str
       description: "Your API key for the Groq API. Required for non-local API usage."
+    azure_openai_api_key:
+      value: null
+      type: str
+      description: "Your API key for the Azure OpenAI service. Required for Azure OpenAI transcription."
+    azure_openai_endpoint:
+      value: null
+      type: str
+      description: "Your Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com). Required for Azure OpenAI transcription."
+    azure_openai_api_version:
+      value: "2024-02-01"
+      type: str
+      description: "The API version to use for Azure OpenAI service."
+    azure_openai_deployment_name:
+      value: null
+      type: str
+      description: "The deployment name for your Azure OpenAI Whisper model. Required for Azure OpenAI transcription."
     base_url:
       value: https://api.openai.com/v1
       type: str

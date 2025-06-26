@@ -2,6 +2,17 @@
 
 This document contains important instructions for AI agents (GitHub Copilot, OpenAI Codex, etc.) working on this codebase.
 
+## 🌍 Language Requirement
+
+**IMPORTANT**: All project communications must be in English. This includes:
+- Pull request descriptions and titles
+- Issue reports and comments
+- Code comments and documentation
+- Commit messages
+- Review comments
+
+This ensures consistency and accessibility for all contributors worldwide.
+
 ## 🚨 MANDATORY: Always Run Tests Before Completion
 
 **CRITICAL REQUIREMENT**: Before completing any work or submitting changes, AI agents MUST run the test suite to ensure all tests pass.
