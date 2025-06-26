@@ -465,6 +465,25 @@ Implemented features can be found in the [CHANGELOG](CHANGELOG.md).
 
 Contributions are welcome! I created this project for my own personal use and didn't expect it to get much attention, so I haven't put much effort into testing or making it easy for others to contribute. If you have ideas or suggestions, feel free to [open a pull request](https://github.com/savbell/whisper-writer/pulls) or [create a new issue](https://github.com/savbell/whisper-writer/issues/new). I'll do my best to review and respond as time allows.
 
+### Running Tests
+
+Before submitting any changes, please ensure all tests pass:
+
+```bash
+pytest tests/ -v
+```
+
+The project includes comprehensive tests for:
+- Audio data validation and file saving functionality
+- Transcription retry logic and error handling  
+- Core ResultThread class operations
+
+All 7 tests must pass before submitting a pull request.
+
+#### For AI Agents
+
+**Important**: AI agents working on this codebase must run the test suite before completing any work. See `AGENTS.md` for detailed instructions.
+
 ## Credits
 
 - [OpenAI](https://openai.com/) for creating the Whisper model and providing the API. Plus [ChatGPT](https://chat.openai.com/), which was used to write a lot of the initial code for this project.
