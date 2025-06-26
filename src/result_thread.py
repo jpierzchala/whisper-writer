@@ -123,7 +123,7 @@ class ResultThread(QThread):
                 if attempt < attempts:
                     time.sleep(1)
 
-            if not result:
+            if not result or not result.strip():
                 file_path = self._save_failed_audio(audio_data)
                 if file_path:
                     ConfigManager.console_print(
