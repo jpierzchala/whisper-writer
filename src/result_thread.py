@@ -109,7 +109,8 @@ class ResultThread(QThread):
                     transcription_time = end_time - start_time
                     if result and result.strip():
                         ConfigManager.console_print(
-                            f'Transcription completed in {transcription_time:.2f} seconds on attempt {attempt}. Post-processed line: {result}'
+                            f'Transcription completed in {transcription_time:.2f} seconds on attempt {attempt}. Post-processed line: {result}', 
+                            verbose=True
                         )
                         break
                     ConfigManager.console_print(

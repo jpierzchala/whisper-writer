@@ -1,9 +1,13 @@
 import yaml
 import os
+import logging
+from datetime import datetime
 
 class ConfigManager:
     _instance = None
     _schema = None
+    _logger = None
+    _file_handler = None
 
     def __init__(self):
         """Initialize the ConfigManager instance."""
@@ -19,6 +23,7 @@ class ConfigManager:
             cls._instance.config = cls._instance.load_default_config()
             cls._instance.load_user_config()
             cls.load_env_variables()
+            cls._setup_logging()
 
     @classmethod
     def get_schema(cls):
@@ -128,6 +133,8 @@ class ConfigManager:
             raise RuntimeError("ConfigManager not initialized")
         with open(config_path, 'w') as file:
             yaml.dump(cls._instance.config, file, default_flow_style=False)
+        # Reload logging configuration after saving config
+        cls._setup_logging()
 
     @classmethod
     def reload_config(cls):
@@ -146,10 +153,87 @@ class ConfigManager:
         return os.path.isfile(config_path)
 
     @classmethod
-    def console_print(cls, message):
-        """Print a message to the console if enabled in the configuration."""
-        if cls._instance and cls._instance.config['misc']['print_to_terminal']:
+    def console_print(cls, message, verbose=False):
+        """Print a message to the console and/or log file based on configuration."""
+        if cls._instance is None:
+            print(message)  # Fallback if not initialized
+            return
+            
+        config = cls._instance.config.get('misc', {})
+        
+        # Check if we should show this message
+        show_message = True
+        if verbose and not config.get('verbose_mode', False):
+            show_message = False
+            
+        if not show_message:
+            return
+            
+        # Print to console if enabled
+        if config.get('print_to_terminal', True):
             print(message)
+            
+        # Log to file if enabled
+        if config.get('log_to_file', False) and cls._logger:
+            cls._logger.info(message)
+
+    @classmethod
+    def _setup_logging(cls):
+        """Setup file logging based on configuration."""
+        if cls._instance is None:
+            return
+            
+        config = cls._instance.config.get('misc', {})
+        
+        if not config.get('log_to_file', False):
+            return
+            
+        # Setup logger
+        cls._logger = logging.getLogger('whisperwriter')
+        cls._logger.setLevel(logging.INFO)
+        
+        # Remove existing handlers to avoid duplicates
+        for handler in cls._logger.handlers[:]:
+            cls._logger.removeHandler(handler)
+            
+        # Determine log file path
+        log_file_path = config.get('log_file_path')
+        if not log_file_path:
+            log_dir = os.path.join(os.path.expanduser('~'), '.whisperwriter', 'logs')
+            os.makedirs(log_dir, exist_ok=True)
+            log_file_path = os.path.join(log_dir, 'whisperwriter.log')
+            
+        # Create file handler
+        cls._file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+        cls._file_handler.setLevel(logging.INFO)
+        
+        # Create formatter
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        cls._file_handler.setFormatter(formatter)
+        
+        # Add handler to logger
+        cls._logger.addHandler(cls._file_handler)
+        
+        cls._logger.info("WhisperWriter logging started")
+
+    @classmethod
+    def set_verbose_mode(cls, verbose):
+        """Set verbose mode for this session."""
+        if cls._instance is None:
+            return
+        cls._instance.config['misc']['verbose_mode'] = verbose
+        
+    @classmethod 
+    def get_verbose_mode(cls):
+        """Get current verbose mode setting."""
+        if cls._instance is None:
+            return False
+        return cls._instance.config.get('misc', {}).get('verbose_mode', False)
+
+    @classmethod
+    def reload_logging(cls):
+        """Reload logging configuration after config changes."""
+        cls._setup_logging()
 
     @classmethod
     def load_env_variables(cls):

@@ -84,4 +84,5 @@ set_cuda_paths()
 
 print('Starting WhisperWriter...')
 load_dotenv()
-subprocess.run([sys.executable, os.path.join('src', 'main.py')])
+# Pass through all command line arguments to main.py
+subprocess.run([sys.executable, os.path.join('src', 'main.py')] + sys.argv[1:])

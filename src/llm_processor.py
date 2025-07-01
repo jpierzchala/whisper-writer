@@ -73,7 +73,7 @@ class LLMProcessor:
                 system_message = ConfigManager.get_schema()['llm_post_processing']['instruction_system_message']['value']
             else:
                 system_message = ConfigManager.get_schema()['llm_post_processing']['system_prompt']['value']
-            ConfigManager.console_print(f"Using default system message: {system_message}")
+            ConfigManager.console_print(f"Using default system message: {system_message}", verbose=True)
         
         api_type = self.config['api_type']
         
@@ -108,7 +108,7 @@ class LLMProcessor:
             ConfigManager.console_print(f"No model specified, using default {mode} model for {api_type}: {model}")
         
         ConfigManager.console_print(f"Processing text with {api_type} using {mode} model: {model}")
-        ConfigManager.console_print(f"Using system message: {system_message}")
+        ConfigManager.console_print(f"Using system message: {system_message}", verbose=True)
         
         if api_type == 'claude':
             return self._process_claude(text, system_message, model)
@@ -153,18 +153,18 @@ class LLMProcessor:
                 json=data
             )
             
-            ConfigManager.console_print(f"Claude API response status: {response.status_code}")
+            ConfigManager.console_print(f"Claude API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
                 response_data = response.json()
-                ConfigManager.console_print(f"Claude API response: {response_data}")
+                ConfigManager.console_print(f"Claude API response: {response_data}", verbose=True)
                 
                 if 'content' in response_data and len(response_data['content']) > 0:
                     processed_text = response_data['content'][0]['text']
-                    ConfigManager.console_print(f"Processed text from Claude model {model}: {processed_text}")
+                    ConfigManager.console_print(f"Processed text from Claude model {model}: {processed_text}", verbose=True)
                     return processed_text
                 
-                ConfigManager.console_print(f"Unexpected Claude API response structure: {response_data}")
+                ConfigManager.console_print(f"Unexpected Claude API response structure: {response_data}", verbose=True)
             else:
                 ConfigManager.console_print(f"Claude API error with model {model}: {response.status_code} - {response.text}")
             
@@ -202,16 +202,16 @@ class LLMProcessor:
                 json=data
             )
             
-            ConfigManager.console_print(f"ChatGPT API response status: {response.status_code}")
+            ConfigManager.console_print(f"ChatGPT API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
                 response_data = response.json()
                 if 'choices' in response_data and len(response_data['choices']) > 0:
                     processed_text = response_data['choices'][0]['message']['content']
-                    ConfigManager.console_print(f"Processed text from ChatGPT: {processed_text}")
+                    ConfigManager.console_print(f"Processed text from ChatGPT: {processed_text}", verbose=True)
                     return processed_text
                 
-                ConfigManager.console_print(f"Unexpected ChatGPT API response structure: {response_data}")
+                ConfigManager.console_print(f"Unexpected ChatGPT API response structure: {response_data}", verbose=True)
             else:
                 ConfigManager.console_print(f"ChatGPT API error: {response.status_code} - {response.text}")
             
@@ -255,7 +255,7 @@ class LLMProcessor:
                 json=data
             )
             
-            ConfigManager.console_print(f"Gemini API response status: {response.status_code}")
+            ConfigManager.console_print(f"Gemini API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
                 response_data = response.json()
@@ -264,10 +264,10 @@ class LLMProcessor:
                     'content' in response_data['candidates'][0] and
                     'parts' in response_data['candidates'][0]['content']):
                     processed_text = response_data['candidates'][0]['content']['parts'][0]['text']
-                    ConfigManager.console_print(f"Processed text from Gemini: {processed_text}")
+                    ConfigManager.console_print(f"Processed text from Gemini: {processed_text}", verbose=True)
                     return processed_text
                 
-                ConfigManager.console_print(f"Unexpected Gemini API response structure: {response_data}")
+                ConfigManager.console_print(f"Unexpected Gemini API response structure: {response_data}", verbose=True)
             else:
                 ConfigManager.console_print(f"Gemini API error: {response.status_code} - {response.text}")
             
@@ -349,9 +349,9 @@ class LLMProcessor:
                 return text
             
             processed_text = response['message']['content'].strip()
-            ConfigManager.console_print(f"Ollama response received:")
-            ConfigManager.console_print(f"- Input length: {len(text)}")
-            ConfigManager.console_print(f"- Output length: {len(processed_text)}")
+            ConfigManager.console_print(f"Ollama response received:", verbose=True)
+            ConfigManager.console_print(f"- Input length: {len(text)}", verbose=True)
+            ConfigManager.console_print(f"- Output length: {len(processed_text)}", verbose=True)
             return processed_text
             
         except ollama.ResponseError as e:
@@ -388,7 +388,7 @@ class LLMProcessor:
             
             if response and hasattr(response.choices[0].message, 'content'):
                 processed_text = response.choices[0].message.content.strip()
-                ConfigManager.console_print(f"Processed text from Groq: {processed_text}")
+                ConfigManager.console_print(f"Processed text from Groq: {processed_text}", verbose=True)
                 return processed_text
             
             ConfigManager.console_print("No valid response from Groq API")
@@ -449,17 +449,17 @@ class LLMProcessor:
                 json=data
             )
             
-            ConfigManager.console_print(f"Azure OpenAI LLM API response status: {response.status_code}")
+            ConfigManager.console_print(f"Azure OpenAI LLM API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
                 response_data = response.json()
                 if 'choices' in response_data and len(response_data['choices']) > 0:
                     processed_text = response_data['choices'][0]['message']['content']
                     ConfigManager.console_print(f"Azure OpenAI LLM API request successful")
-                    ConfigManager.console_print(f"Processed text: {processed_text}")
+                    ConfigManager.console_print(f"Processed text: {processed_text}", verbose=True)
                     return processed_text
                 else:
-                    ConfigManager.console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}")
+                    ConfigManager.console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}", verbose=True)
             else:
                 ConfigManager.console_print(f"Azure OpenAI LLM API error: {response.text}")
             
