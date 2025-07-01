@@ -63,6 +63,7 @@ Additionally, WhisperWriter has a few other tricks up its sleeve:
   - Example: Add a sitemap of your documentation and instruct the model to build Markdown links from the URLs when it detects you're trying to link to a page in a support response or email.
 - **Clipboard Input and Threshold**: If the transcript contains more characters than the Clipboard Threshold, it will be pasted into the current application. This will replace the default behavior of simulating keyboard input, which can be unreliable.
 - **Pause Audio While Recording**: You can choose to automatically pause audio while recording; it'll start playing again when you stop recording.
+- **Windows Autostart**: Optionally configure WhisperWriter to automatically start when you log into Windows. This feature is only available on Windows systems and can be enabled/disabled through the settings interface.
 - **Keyring Credentials**: Keys are stored in the Windows Credential Manager using the `keyring` library.
 
 ## Installing WhisperWriter

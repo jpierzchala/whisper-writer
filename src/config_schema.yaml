@@ -339,3 +339,7 @@ misc:
     value: false
     type: bool
     description: "Automatically pause/resume media during recording"
+  autostart_on_login:
+    value: false
+    type: bool
+    description: "Automatically start WhisperWriter when logging into Windows (Windows only)"

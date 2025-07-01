@@ -313,6 +313,12 @@ class SettingsWindow(BaseWindow):
         widget.setChecked(value)
         if key == 'use_api':
             widget.setObjectName('model_options_use_api_input')
+        elif key == 'autostart_on_login':
+            # Import AutostartManager for platform checking
+            import platform
+            if platform.system() != 'Windows':
+                widget.setEnabled(False)
+                widget.setToolTip("Autostart is only supported on Windows")
         return widget
 
     def create_combobox(self, value, options):
@@ -413,6 +419,17 @@ class SettingsWindow(BaseWindow):
         ConfigManager.set_config_value(None, 'llm_post_processing', 'groq_api_key')
 
         ConfigManager.save_config()
+        
+        # Handle autostart setting (Windows only)
+        autostart_enabled = ConfigManager.get_config_value('misc', 'autostart_on_login')
+        if autostart_enabled is not None:
+            try:
+                from autostart_manager import AutostartManager
+                success, message = AutostartManager.set_autostart(autostart_enabled)
+                if not success:
+                    QMessageBox.warning(self, 'Autostart Warning', f'Could not configure autostart: {message}')
+            except ImportError:
+                QMessageBox.warning(self, 'Autostart Warning', 'Autostart functionality is not available')
         
         QMessageBox.information(self, 'Settings Saved', 'Settings have been saved. The application will now restart.')
         self.settings_saved.emit()
