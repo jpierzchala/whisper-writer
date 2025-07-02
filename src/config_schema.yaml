@@ -339,3 +339,19 @@ misc:
     value: false
     type: bool
     description: "Automatically pause/resume media during recording"
+  autostart_on_login:
+    value: false
+    type: bool
+    description: "Automatically start WhisperWriter when logging into Windows (Windows only)"
+  log_to_file:
+    value: false
+    type: bool
+    description: "Enable logging to file instead of console output"
+  log_file_path:
+    value: null
+    type: str
+    description: "Custom path for log file. If null, uses default: ~/.whisperwriter/logs/whisperwriter.log"
+  verbose_mode:
+    value: false
+    type: bool
+    description: "Enable verbose logging including full prompts, system messages, and API responses"

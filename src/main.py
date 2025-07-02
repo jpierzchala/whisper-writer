@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import argparse
 from audioplayer import AudioPlayer
 from pynput.keyboard import Controller, Key
 from PyQt5.QtCore import QObject, QProcess
@@ -21,15 +22,21 @@ from llm_processor import LLMProcessor
 
 
 class WhisperWriterApp(QObject):
-    def __init__(self):
+    def __init__(self, verbose_mode=False):
         """
         Initialize the application, opening settings window if no configuration file is found.
+        
+        :param verbose_mode: Enable verbose logging for this session
         """
         super().__init__()
         self.app = QApplication(sys.argv)
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
 
         ConfigManager.initialize()
+        
+        # Set verbose mode if specified via command line
+        if verbose_mode:
+            ConfigManager.set_verbose_mode(True)
 
         self.settings_window = SettingsWindow()
         self.settings_window.settings_closed.connect(self.on_settings_closed)
@@ -166,23 +173,23 @@ class WhisperWriterApp(QObject):
         self.use_llm = use_llm
         self.is_instruction_mode = is_instruction_mode
         
-        ConfigManager.console_print(f"Deactivation called - use_llm: {use_llm}, is_instruction_mode: {is_instruction_mode}")
-        ConfigManager.console_print(f"Recording mode: {ConfigManager.get_config_value('recording_options', 'recording_mode')}")
-        ConfigManager.console_print(f"Result thread running: {self.result_thread and self.result_thread.isRunning()}")
+        ConfigManager.console_print(f"Deactivation called - use_llm: {use_llm}, is_instruction_mode: {is_instruction_mode}", verbose=True)
+        ConfigManager.console_print(f"Recording mode: {ConfigManager.get_config_value('recording_options', 'recording_mode')}", verbose=True)
+        ConfigManager.console_print(f"Result thread running: {self.result_thread and self.result_thread.isRunning()}", verbose=True)
         
         if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'hold_to_record':
             if self.result_thread and self.result_thread.isRunning():
-                ConfigManager.console_print("Stopping recording...")
+                ConfigManager.console_print("Stopping recording...", verbose=True)
                 self.result_thread.stop_recording()
 
     def on_deactivation_with_llm(self):
         """Called when the LLM cleanup activation key combination is released."""
-        ConfigManager.console_print("LLM cleanup deactivation triggered")
+        ConfigManager.console_print("LLM cleanup deactivation triggered", verbose=True)
         self.on_deactivation(use_llm=True, is_instruction_mode=False)
 
     def on_deactivation_with_llm_instruction(self):
         """Called when the LLM instruction activation key combination is released."""
-        ConfigManager.console_print("LLM instruction deactivation triggered")
+        ConfigManager.console_print("LLM instruction deactivation triggered", verbose=True)
         self.on_deactivation(use_llm=True, is_instruction_mode=True)
 
     def start_result_thread(self):
@@ -229,7 +236,7 @@ class WhisperWriterApp(QObject):
                     # Start with a clean system message
                     system_message = base_message.strip() if base_message else ""
                     
-                    ConfigManager.console_print(f"Retrieved {mode_name} base message from settings: {system_message}")
+                    ConfigManager.console_print(f"Retrieved {mode_name} base message from settings: {system_message}", verbose=True)
                     
                     if not file_path:
                         ConfigManager.console_print("No file path set, using only the system message from settings")
@@ -246,7 +253,7 @@ class WhisperWriterApp(QObject):
                                         system_message = f"{system_message}\n\n{file_content}"
                                     else:
                                         system_message = file_content
-                                    ConfigManager.console_print(f"Added fresh file content from {file_path}")
+                                    ConfigManager.console_print(f"Added fresh file content from {file_path}", verbose=True)
                         except Exception as e:
                             ConfigManager.console_print(f"Error reading system message file: {str(e)}")
                     
@@ -254,7 +261,7 @@ class WhisperWriterApp(QObject):
                         ConfigManager.console_print("Warning: No system message found, using original transcription")
                         return result
                     
-                    ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}")
+                    ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}", verbose=True)
                     processed_result = self.llm_processor.process_text(result, system_message)
                     if processed_result:
                         result = processed_result.strip()
@@ -309,7 +316,7 @@ class WhisperWriterApp(QObject):
                 ConfigManager.console_print("No text in clipboard")
                 return
             
-            ConfigManager.console_print(f"Processing clipboard text: {clipboard_text[:100]}...")
+            ConfigManager.console_print(f"Processing clipboard text: {clipboard_text[:100]}...", verbose=True)
             
             # Get the base system message
             base_message = ConfigManager.get_config_value("llm_post_processing", "text_cleanup_system_message")
@@ -318,12 +325,12 @@ class WhisperWriterApp(QObject):
             # Start with a clean system message
             system_message = base_message.strip() if base_message else ""
             
-            ConfigManager.console_print(f"Base cleanup system message: {system_message}")
+            ConfigManager.console_print(f"Base cleanup system message: {system_message}", verbose=True)
             
             # Append file contents if file path exists and is not empty
             if file_path and os.path.exists(file_path):
                 try:
-                    ConfigManager.console_print(f"Reading cleanup instructions from file: {file_path}")
+                    ConfigManager.console_print(f"Reading cleanup instructions from file: {file_path}", verbose=True)
                     with open(file_path, 'r', encoding='utf-8') as file:
                         file_content = file.read().strip()
                         if file_content:  # Only append if file has content
@@ -331,7 +338,7 @@ class WhisperWriterApp(QObject):
                                 system_message = f"{system_message}\n\n{file_content}"
                             else:
                                 system_message = file_content
-                            ConfigManager.console_print("Successfully added file content to cleanup instructions")
+                            ConfigManager.console_print("Successfully added file content to cleanup instructions", verbose=True)
                 except Exception as e:
                     ConfigManager.console_print(f"Error reading cleanup system message file: {str(e)}")
             
@@ -339,7 +346,7 @@ class WhisperWriterApp(QObject):
                 ConfigManager.console_print("Warning: No cleanup system message found")
                 return
             
-            ConfigManager.console_print(f"Final cleanup system message: {system_message}")
+            ConfigManager.console_print(f"Final cleanup system message: {system_message}", verbose=True)
             
             # Run through LLM cleanup
             cleaned_text = self.llm_processor.process_text(clipboard_text, system_message)
@@ -410,6 +417,21 @@ class WhisperWriterApp(QObject):
         sys.exit(self.app.exec_())
 
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='WhisperWriter - AI-powered speech-to-text application',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        '-V', '--verbose',
+        action='store_true',
+        help='Enable verbose logging including full prompts, system messages, and API responses'
+    )
+    return parser.parse_args()
+
+
 if __name__ == '__main__':
-    app = WhisperWriterApp()
+    args = parse_arguments()
+    app = WhisperWriterApp(verbose_mode=args.verbose)
     app.run()
