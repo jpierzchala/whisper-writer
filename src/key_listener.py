@@ -955,7 +955,8 @@ class PynputBackend(InputBackend):
             on_release=self._on_keyboard_release
         )
         self.mouse_listener = self.mouse.Listener(
-            on_click=self._on_mouse_click
+            on_click=self._on_mouse_click,
+            on_scroll=self._on_mouse_scroll
         )
         self.keyboard_listener.start()
         self.mouse_listener.start()
@@ -1076,6 +1077,12 @@ class PynputBackend(InputBackend):
         translated_event = self._translate_key_event((button, pressed))
         if translated_event:
             self.on_input_event(translated_event)
+
+    def _on_mouse_scroll(self, x, y, dx, dy):
+        """Handle mouse scroll events: ignore to avoid system beep."""
+        # Minimal handler: ignore scroll events at our layer.
+        # Do not return False here; in pynput this would stop the listener.
+        pass
 
     def _create_key_map(self):
         """Create a mapping from pynput keys to our internal KeyCode enum."""
