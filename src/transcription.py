@@ -7,8 +7,14 @@ import wave
 import json
 import requests
 from tqdm import tqdm
-from openai import OpenAI
-from groq import Groq
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - optional in tests
+    OpenAI = None
+try:
+    from groq import Groq
+except Exception:  # pragma: no cover - optional in tests
+    Groq = None
 
 from utils import ConfigManager
 from keyring_manager import KeyringManager
@@ -474,6 +480,10 @@ def transcribe_with_groq(audio_data, api_options):
         sf.write(byte_io, audio_data, 16000, format='wav')
         byte_io.seek(0)
         
+        if Groq is None:
+            ConfigManager.console_print("Groq SDK not available. Please install 'groq' package or choose a different API.")
+            return ''
+
         client = Groq(api_key=api_key)
         
         model = api_options['model']
