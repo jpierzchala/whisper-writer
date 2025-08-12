@@ -3,20 +3,44 @@ import json
 import requests
 from utils import ConfigManager
 from keyring_manager import KeyringManager
-from openai import OpenAI
-from anthropic import Anthropic
-import google.generativeai as genai
 import importlib
-import ollama
-from groq import Groq
+
+# Optional third-party SDK imports; guard to avoid hard dependency in tests
+try:
+    import ollama
+except Exception:  # pragma: no cover - optional dependency
+    ollama = None
+try:
+    import google.generativeai as genai
+except Exception:  # pragma: no cover - optional dependency
+    genai = None
+
+try:
+    from groq import Groq
+except Exception:  # pragma: no cover - optional dependency
+    Groq = None
 
 # Check if Ollama is available
-HAS_OLLAMA = importlib.util.find_spec("ollama") is not None
+HAS_OLLAMA = ollama is not None
 
 class LLMProcessor:
     def __init__(self, api_type=None):
         """Initialize the LLM processor."""
         self.config = ConfigManager.get_config_section('llm_post_processing')
+        
+        # Helper to safely print with optional verbose kwarg in tests
+        # Some tests stub console_print as a lambda without kwargs
+        def _safe_print(message: str, verbose: bool = False) -> None:
+            try:
+                ConfigManager.console_print(message, verbose=verbose)
+            except TypeError:
+                try:
+                    ConfigManager.console_print(message)
+                except Exception:
+                    pass
+        
+        # Bind as instance method
+        self._safe_console_print = _safe_print
         
         # If api_type is passed, use it; otherwise get from config without assuming a default
         if api_type is None:
@@ -107,8 +131,8 @@ class LLMProcessor:
                 model = default_models.get(api_type)
             ConfigManager.console_print(f"No model specified, using default {mode} model for {api_type}: {model}")
         
-        ConfigManager.console_print(f"Processing text with {api_type} using {mode} model: {model}")
-        ConfigManager.console_print(f"Using system message: {system_message}", verbose=True)
+        self._safe_console_print(f"Processing text with {api_type} using {mode} model: {model}")
+        self._safe_console_print(f"Using system message: {system_message}", verbose=True)
         
         if api_type == 'claude':
             return self._process_claude(text, system_message, model)
@@ -223,6 +247,9 @@ class LLMProcessor:
     def _process_gemini(self, text: str, system_message: str, model: str) -> str:
         api_key = KeyringManager.get_api_key("gemini")
         ConfigManager.console_print(f"Using Gemini API key: {'[SET]' if api_key else '[NOT SET]'}")
+        if genai is None:
+            ConfigManager.console_print("Gemini SDK not available. Please install 'google-generativeai' or choose a different API.")
+            return text
         
         headers = {
             'Content-Type': 'application/json'
@@ -363,6 +390,10 @@ class LLMProcessor:
 
     def _process_groq(self, text: str, system_message: str, model: str) -> str:
         """Process text through Groq's API."""
+        if Groq is None:
+            ConfigManager.console_print("Groq SDK not available. Please install 'groq' package or choose a different API.")
+            return text
+
         api_key = KeyringManager.get_api_key("groq")
         ConfigManager.console_print(f"Using Groq API key: {'[SET]' if api_key else '[NOT SET]'}")
         
@@ -436,6 +467,38 @@ class LLMProcessor:
             ]
         }
 
+        # Attempt to enable structured outputs when supported by the Azure API version
+        # This helps constrain the model to return a strict JSON object with the cleaned text.
+        api_version_str = str(api_version or '').lower()
+        def _api_version_supports_structured_outputs(version_str: str) -> bool:
+            if 'preview' in version_str:
+                return True
+            # Try to extract year from version string (format: YYYY-MM-DD)
+            try:
+                year = int(version_str[:4])
+                return year >= 2025
+            except Exception:
+                return False
+        supports_structured_outputs = _api_version_supports_structured_outputs(api_version_str)
+
+        if supports_structured_outputs:
+            schema = {
+                "type": "object",
+                "properties": {
+                    "processed_and_cleaned_transcript": {"type": "string"}
+                },
+                "required": ["processed_and_cleaned_transcript"],
+                "additionalProperties": False
+            }
+            data["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "processed_transcript_schema",
+                    "schema": schema,
+                    "strict": True
+                }
+            }
+
         # Only include temperature parameter for non-OpenAI (o*) family models
         if not model.startswith('o'):
             data['temperature'] = self.config['temperature']
@@ -449,17 +512,33 @@ class LLMProcessor:
                 json=data
             )
             
-            ConfigManager.console_print(f"Azure OpenAI LLM API response status: {response.status_code}", verbose=True)
+            self._safe_console_print(f"Azure OpenAI LLM API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
                 response_data = response.json()
                 if 'choices' in response_data and len(response_data['choices']) > 0:
-                    processed_text = response_data['choices'][0]['message']['content']
-                    ConfigManager.console_print(f"Azure OpenAI LLM API request successful")
-                    ConfigManager.console_print(f"Processed text: {processed_text}", verbose=True)
+                    message = response_data['choices'][0].get('message', {})
+                    content = message.get('content', '')
+
+                    # If structured outputs were requested, try to parse JSON and extract the field
+                    if supports_structured_outputs and isinstance(content, str):
+                        try:
+                            obj = json.loads(content)
+                            cleaned = obj.get('processed_and_cleaned_transcript')
+                            if isinstance(cleaned, str) and cleaned.strip():
+                                self._safe_console_print("Azure OpenAI LLM API request successful (structured output)")
+                                return cleaned.strip()
+                        except json.JSONDecodeError as e:
+                            # Log parse failure and fallback if the model returned plain text despite the schema request
+                            self._safe_console_print(f"Structured outputs JSON parsing failed, falling back to plain text: {e}")
+
+                    # Fallback: use the raw content
+                    processed_text = content
+                    self._safe_console_print("Azure OpenAI LLM API request successful")
+                    self._safe_console_print(f"Processed text: {processed_text}", verbose=True)
                     return processed_text
                 else:
-                    ConfigManager.console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}", verbose=True)
+                    self._safe_console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}", verbose=True)
             else:
                 ConfigManager.console_print(f"Azure OpenAI LLM API error: {response.text}")
             
@@ -530,6 +609,8 @@ class LLMProcessor:
                 return models
                 
             elif api_type == 'gemini':
+                if genai is None:
+                    return []
                 genai.configure(api_key=api_key)
                 models = [m.name for m in genai.list_models() 
                          if 'generateContent' in m.supported_generation_methods]
