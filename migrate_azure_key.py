@@ -3,6 +3,18 @@ import yaml
 import keyring
 
 
+def get_nested(dct, keys, default=None):
+    current = dct
+    try:
+        for k in keys:
+            if current is None:
+                return default
+            current = current.get(k)
+        return current if current is not None else default
+    except Exception:
+        return default
+
+
 def migrate_azure_key(config_path: str = 'config.yaml') -> None:
     """Migrate Azure OpenAI transcription key from config.yaml to system keyring.
 
@@ -16,7 +28,7 @@ def migrate_azure_key(config_path: str = 'config.yaml') -> None:
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f) or {}
 
-    api = (((config or {}).get('model_options') or {}).get('api') or {})
+    api = get_nested(config, ['model_options', 'api'], default={})
     azure_key = api.get('azure_openai_api_key')
 
     if not azure_key:

@@ -7,7 +7,7 @@ import importlib
 
 # Optional third-party SDK imports; guard to avoid hard dependency in tests
 try:
-    import ollama  # noqa: F401
+    import ollama
 except Exception:  # pragma: no cover - optional dependency
     ollama = None
 try:
@@ -27,6 +27,20 @@ class LLMProcessor:
     def __init__(self, api_type=None):
         """Initialize the LLM processor."""
         self.config = ConfigManager.get_config_section('llm_post_processing')
+        
+        # Helper to safely print with optional verbose kwarg in tests
+        # Some tests stub console_print as a lambda without kwargs
+        def _safe_print(message: str, verbose: bool = False) -> None:
+            try:
+                ConfigManager.console_print(message, verbose=verbose)
+            except TypeError:
+                try:
+                    ConfigManager.console_print(message)
+                except Exception:
+                    pass
+        
+        # Bind as instance method
+        self._safe_console_print = _safe_print
         
         # If api_type is passed, use it; otherwise get from config without assuming a default
         if api_type is None:
@@ -117,13 +131,8 @@ class LLMProcessor:
                 model = default_models.get(api_type)
             ConfigManager.console_print(f"No model specified, using default {mode} model for {api_type}: {model}")
         
-        # Guard verbose kwarg for tests that stub console_print as a lambda without kwargs
-        try:
-            ConfigManager.console_print(f"Processing text with {api_type} using {mode} model: {model}")
-            ConfigManager.console_print(f"Using system message: {system_message}", verbose=True)
-        except TypeError:
-            ConfigManager.console_print(f"Processing text with {api_type} using {mode} model: {model}")
-            ConfigManager.console_print(f"Using system message: {system_message}")
+        self._safe_console_print(f"Processing text with {api_type} using {mode} model: {model}")
+        self._safe_console_print(f"Using system message: {system_message}", verbose=True)
         
         if api_type == 'claude':
             return self._process_claude(text, system_message, model)
@@ -460,11 +469,17 @@ class LLMProcessor:
 
         # Attempt to enable structured outputs when supported by the Azure API version
         # This helps constrain the model to return a strict JSON object with the cleaned text.
-        try:
-            api_version_str = str(api_version or '').lower()
-            supports_structured_outputs = ('preview' in api_version_str) or api_version_str.startswith('2025')
-        except Exception:
-            supports_structured_outputs = False
+        api_version_str = str(api_version or '').lower()
+        def _api_version_supports_structured_outputs(version_str: str) -> bool:
+            if 'preview' in version_str:
+                return True
+            # Try to extract year from version string (format: YYYY-MM-DD)
+            try:
+                year = int(version_str[:4])
+                return year >= 2025
+            except Exception:
+                return False
+        supports_structured_outputs = _api_version_supports_structured_outputs(api_version_str)
 
         if supports_structured_outputs:
             schema = {
@@ -497,10 +512,7 @@ class LLMProcessor:
                 json=data
             )
             
-            try:
-                ConfigManager.console_print(f"Azure OpenAI LLM API response status: {response.status_code}", verbose=True)
-            except TypeError:
-                ConfigManager.console_print(f"Azure OpenAI LLM API response status: {response.status_code}")
+            self._safe_console_print(f"Azure OpenAI LLM API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
                 response_data = response.json()
@@ -514,26 +526,19 @@ class LLMProcessor:
                             obj = json.loads(content)
                             cleaned = obj.get('processed_and_cleaned_transcript')
                             if isinstance(cleaned, str) and cleaned.strip():
-                                ConfigManager.console_print(f"Azure OpenAI LLM API request successful (structured output)")
+                                self._safe_console_print("Azure OpenAI LLM API request successful (structured output)")
                                 return cleaned.strip()
-                        except json.JSONDecodeError:
-                            # Fallback if the model returned plain text despite the schema request
-                            pass
+                        except json.JSONDecodeError as e:
+                            # Log parse failure and fallback if the model returned plain text despite the schema request
+                            self._safe_console_print(f"Structured outputs JSON parsing failed, falling back to plain text: {e}")
 
                     # Fallback: use the raw content
                     processed_text = content
-                    try:
-                        ConfigManager.console_print(f"Azure OpenAI LLM API request successful")
-                        ConfigManager.console_print(f"Processed text: {processed_text}", verbose=True)
-                    except TypeError:
-                        ConfigManager.console_print(f"Azure OpenAI LLM API request successful")
-                        ConfigManager.console_print(f"Processed text: {processed_text}")
+                    self._safe_console_print("Azure OpenAI LLM API request successful")
+                    self._safe_console_print(f"Processed text: {processed_text}", verbose=True)
                     return processed_text
                 else:
-                    try:
-                        ConfigManager.console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}", verbose=True)
-                    except TypeError:
-                        ConfigManager.console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}")
+                    self._safe_console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}", verbose=True)
             else:
                 ConfigManager.console_print(f"Azure OpenAI LLM API error: {response.text}")
             
