@@ -23,7 +23,8 @@ except Exception:  # pragma: no cover - optional dependency
 # Check if Ollama is available
 HAS_OLLAMA = ollama is not None
 RESPONSES_API_ENDPOINT = "https://api.openai.com/v1/responses"
-RESPONSES_MODEL_PREFIXES = ("gpt-5.1",)
+REASONING_MODEL_PREFIXES = ("gpt-5", "o1")
+RESPONSES_MODEL_PREFIXES = ("gpt-5",)
 
 class LLMProcessor:
     def __init__(self, api_type=None):
@@ -44,6 +45,7 @@ class LLMProcessor:
         # Bind as instance method
         self._safe_console_print = _safe_print
         
+        self.api_key = None
         # If api_type is passed, use it; otherwise get from config without assuming a default
         if api_type is None:
             self.api_type = self.config.get('api_type')
@@ -59,9 +61,9 @@ class LLMProcessor:
         if self.api_type == 'claude':
             self.api_key = KeyringManager.get_api_key("claude")
             ConfigManager.console_print("Using Claude API")
-        elif self.api_type == 'chatgpt':
+        elif self.api_type == 'openai':
             self.api_key = KeyringManager.get_api_key("openai_llm")
-            ConfigManager.console_print("Using ChatGPT API")
+            ConfigManager.console_print("Using OpenAI API")
         elif self.api_type == 'azure_openai':
             self.api_key = KeyringManager.get_api_key("azure_openai_llm")
             ConfigManager.console_print("Using Azure OpenAI LLM API")
@@ -114,7 +116,7 @@ class LLMProcessor:
         # Default models if none specified
         default_models = {
             'claude': 'claude-3-5-sonnet-latest',
-            'chatgpt': 'gpt-4o-mini',
+            'openai': 'gpt-4o-mini',
             'azure_openai': 'gpt-4o-mini',
             'gemini': 'gemini-1.5-flash',
             'groq': 'llama-3.1-8b-instant',
@@ -136,10 +138,10 @@ class LLMProcessor:
         
         if api_type == 'claude':
             return self._process_claude(text, system_message, model)
-        elif api_type == 'chatgpt':
-            return self._process_chatgpt(text, system_message, model)
+        elif api_type == 'openai':
+            return self._process_openai(text, system_message, model)
         elif api_type == 'azure_openai':
-            return self._process_azure_openai(text, system_message, model)
+            return self._process_azure_openai(text, system_message, model, mode)
         elif api_type == 'gemini':
             return self._process_gemini(text, system_message, model)
         elif api_type == 'ollama':
@@ -198,9 +200,9 @@ class LLMProcessor:
         
         return text
         
-    def _process_chatgpt(self, text: str, system_message: str, model: str) -> str:
+    def _process_openai(self, text: str, system_message: str, model: str) -> str:
         api_key = KeyringManager.get_api_key("openai_llm")
-        ConfigManager.console_print(f"Using ChatGPT API key: {'[SET]' if api_key else '[NOT SET]'}")
+        ConfigManager.console_print(f"Using OpenAI API key: {'[SET]' if api_key else '[NOT SET]'}")
         
         if self._should_use_responses_api(model):
             self._safe_console_print(f"Routing model {model} through the Responses API with reasoning effort 'none'")
@@ -219,9 +221,8 @@ class LLMProcessor:
             ]
         }
 
-        # Only include temperature parameter for non-OpenAI (o*) family models
-        if not model.startswith('o'):
-            data['temperature'] = self.config['temperature']
+        if not self._model_requires_reasoning_controls(model):
+            data['temperature'] = self.config.get('temperature', 0.3)
         
         try:
             response = requests.post(
@@ -230,21 +231,21 @@ class LLMProcessor:
                 json=data
             )
             
-            ConfigManager.console_print(f"ChatGPT API response status: {response.status_code}", verbose=True)
+            ConfigManager.console_print(f"OpenAI API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
                 response_data = response.json()
                 if 'choices' in response_data and len(response_data['choices']) > 0:
                     processed_text = response_data['choices'][0]['message']['content']
-                    ConfigManager.console_print(f"Processed text from ChatGPT: {processed_text}", verbose=True)
+                    ConfigManager.console_print(f"Processed text from OpenAI API: {processed_text}", verbose=True)
                     return processed_text
                 
-                ConfigManager.console_print(f"Unexpected ChatGPT API response structure: {response_data}", verbose=True)
+                ConfigManager.console_print(f"Unexpected OpenAI API response structure: {response_data}", verbose=True)
             else:
-                ConfigManager.console_print(f"ChatGPT API error: {response.status_code} - {response.text}")
+                ConfigManager.console_print(f"OpenAI API error: {response.status_code} - {response.text}")
             
         except Exception as e:
-            ConfigManager.console_print(f"Error in ChatGPT API call: {str(e)}")
+            ConfigManager.console_print(f"Error in OpenAI API call: {str(e)}")
         
         return text
 
@@ -254,6 +255,13 @@ class LLMProcessor:
             return False
         lowered = model.lower()
         return any(lowered.startswith(prefix) for prefix in RESPONSES_MODEL_PREFIXES)
+
+    @staticmethod
+    def _model_requires_reasoning_controls(model: str) -> bool:
+        if not model:
+            return False
+        lowered = model.lower()
+        return any(lowered.startswith(prefix) for prefix in REASONING_MODEL_PREFIXES)
 
     def _process_openai_responses(self, text: str, system_message: str, model: str, api_key: str) -> str:
         """Invoke the OpenAI Responses API for GPT-5.1-class models."""
@@ -284,12 +292,13 @@ class LLMProcessor:
         payload = {
             "model": model,
             "input": messages,
-            "temperature": self.config.get('temperature', 0.3),
             "max_output_tokens": 1024,
             "reasoning": {
                 "effort": "none"
             }
         }
+        if not self._model_requires_reasoning_controls(model):
+            payload["temperature"] = self.config.get('temperature', 0.3)
 
         try:
             response = requests.post(
@@ -535,7 +544,7 @@ class LLMProcessor:
         
         return text
 
-    def _process_azure_openai(self, text: str, system_message: str, model: str) -> str:
+    def _process_azure_openai(self, text: str, system_message: str, model: str, mode: str) -> str:
         """Process text using Azure OpenAI API."""
         api_key = KeyringManager.get_api_key("azure_openai_llm")
         ConfigManager.console_print(f"Using Azure OpenAI LLM API key: {'[SET]' if api_key else '[NOT SET]'}")
@@ -547,7 +556,7 @@ class LLMProcessor:
         # Get Azure OpenAI specific configuration for LLM
         endpoint = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_endpoint')
         api_version = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_api_version')
-        deployment_name = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_deployment_name')
+        deployment_name = self._get_azure_deployment_name(mode)
         
         if not endpoint:
             ConfigManager.console_print("Azure OpenAI LLM endpoint not configured")
@@ -556,15 +565,26 @@ class LLMProcessor:
         if not deployment_name:
             ConfigManager.console_print("Azure OpenAI LLM deployment name not configured")
             return text
-        
-        # Construct Azure OpenAI URL for chat completions
-        base_url = f"{endpoint}/openai/deployments/{deployment_name}/chat/completions?api-version={api_version}"
-        ConfigManager.console_print(f"Using Azure OpenAI LLM endpoint: {base_url}")
-        
         headers = {
             'api-key': api_key,
             'Content-Type': 'application/json'
         }
+        supports_structured_outputs = self._azure_supports_structured_outputs(api_version)
+
+        if self._model_requires_reasoning_controls(model):
+            return self._process_azure_openai_responses(
+                text,
+                system_message,
+                model,
+                headers,
+                endpoint,
+                api_version,
+                deployment_name,
+                supports_structured_outputs
+            )
+        
+        base_url = f"{endpoint}/openai/deployments/{deployment_name}/chat/completions?api-version={api_version}"
+        ConfigManager.console_print(f"Using Azure OpenAI LLM endpoint: {base_url}")
         
         data = {
             'messages': [
@@ -573,41 +593,25 @@ class LLMProcessor:
             ]
         }
 
-        # Attempt to enable structured outputs when supported by the Azure API version
-        # This helps constrain the model to return a strict JSON object with the cleaned text.
-        api_version_str = str(api_version or '').lower()
-        def _api_version_supports_structured_outputs(version_str: str) -> bool:
-            if 'preview' in version_str:
-                return True
-            # Try to extract year from version string (format: YYYY-MM-DD)
-            try:
-                year = int(version_str[:4])
-                return year >= 2025
-            except Exception:
-                return False
-        supports_structured_outputs = _api_version_supports_structured_outputs(api_version_str)
-
         if supports_structured_outputs:
-            schema = {
-                "type": "object",
-                "properties": {
-                    "processed_and_cleaned_transcript": {"type": "string"}
-                },
-                "required": ["processed_and_cleaned_transcript"],
-                "additionalProperties": False
-            }
             data["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "processed_transcript_schema",
-                    "schema": schema,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "processed_and_cleaned_transcript": {"type": "string"}
+                        },
+                        "required": ["processed_and_cleaned_transcript"],
+                        "additionalProperties": False
+                    },
                     "strict": True
                 }
             }
 
-        # Only include temperature parameter for non-OpenAI (o*) family models
-        if not model.startswith('o'):
-            data['temperature'] = self.config['temperature']
+        if not self._model_requires_reasoning_controls(model):
+            data['temperature'] = self.config.get('temperature', 0.3)
         
         try:
             ConfigManager.console_print(f"Sending request to Azure OpenAI LLM API using deployment {deployment_name}...")
@@ -626,7 +630,6 @@ class LLMProcessor:
                     message = response_data['choices'][0].get('message', {})
                     content = message.get('content', '')
 
-                    # If structured outputs were requested, try to parse JSON and extract the field
                     if supports_structured_outputs and isinstance(content, str):
                         try:
                             obj = json.loads(content)
@@ -635,10 +638,8 @@ class LLMProcessor:
                                 self._safe_console_print("Azure OpenAI LLM API request successful (structured output)")
                                 return cleaned.strip()
                         except json.JSONDecodeError as e:
-                            # Log parse failure and fallback if the model returned plain text despite the schema request
                             self._safe_console_print(f"Structured outputs JSON parsing failed, falling back to plain text: {e}")
 
-                    # Fallback: use the raw content
                     processed_text = content
                     self._safe_console_print("Azure OpenAI LLM API request successful")
                     self._safe_console_print(f"Processed text: {processed_text}", verbose=True)
@@ -652,13 +653,105 @@ class LLMProcessor:
             ConfigManager.console_print(f"Error transcribing with Azure OpenAI LLM: {str(e)}")
         
         return text
+
+    def _process_azure_openai_responses(
+        self,
+        text: str,
+        system_message: str,
+        model: str,
+        headers: dict,
+        endpoint: str,
+        api_version: str,
+        deployment_name: str,
+        supports_structured_outputs: bool
+    ) -> str:
+        api_version_param = (api_version or 'v1').strip() or 'v1'
+        normalized_endpoint = endpoint.rstrip('/')
+        base_url = f"{normalized_endpoint}/openai/v1/responses?api-version={api_version_param}"
+        ConfigManager.console_print(f"Using Azure OpenAI Responses endpoint: {base_url}")
+
+        messages = []
+        if system_message:
+            messages.append({
+                "role": "system",
+                "content": [
+                    {"type": "input_text", "text": system_message}
+                ]
+            })
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": text}
+            ]
+        })
+
+        payload = {
+            "model": deployment_name,
+            "input": messages,
+            "max_output_tokens": 1024,
+            "reasoning": {"effort": "none"}
+        }
+
+        if supports_structured_outputs:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "processed_transcript_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "processed_and_cleaned_transcript": {"type": "string"}
+                        },
+                        "required": ["processed_and_cleaned_transcript"],
+                        "additionalProperties": False
+                    },
+                    "strict": True
+                }
+            }
+
+        try:
+            response = requests.post(base_url, headers=headers, json=payload, timeout=60)
+            self._safe_console_print(f"Azure OpenAI Responses status: {response.status_code}", verbose=True)
+
+            if response.status_code == 200:
+                response_data = response.json()
+                processed_text = self._extract_text_from_responses_output(response_data)
+                if processed_text:
+                    self._safe_console_print("Azure OpenAI Responses request successful", verbose=True)
+                    return processed_text
+                self._safe_console_print(f"Unexpected Azure Responses payload: {response_data}", verbose=True)
+            else:
+                ConfigManager.console_print(f"Azure OpenAI Responses error: {response.status_code} - {response.text}")
+        except Exception as exc:
+            ConfigManager.console_print(f"Error calling Azure OpenAI Responses API: {exc}")
+        return text
+
+    def _get_azure_deployment_name(self, mode: str) -> str | None:
+        cleanup_name = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_cleanup_deployment_name')
+        instruction_name = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_instruction_deployment_name')
+        legacy_name = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_deployment_name')
+
+        if mode == "instruction":
+            return instruction_name or legacy_name
+        return cleanup_name or legacy_name
+
+    @staticmethod
+    def _azure_supports_structured_outputs(api_version: str | None) -> bool:
+        version_str = str(api_version or '').lower()
+        if 'preview' in version_str:
+            return True
+        try:
+            year = int(version_str[:4])
+            return year >= 2025
+        except Exception:
+            return False
     
     def get_available_models(self, api_type):
         """Get available models for the specified API type."""
         ConfigManager.console_print(f"\n=== Fetching models for API type: {api_type} ===")
         
         # Validate API type early
-        if api_type not in ['claude', 'chatgpt', 'gemini', 'ollama', 'groq']:
+        if api_type not in ['claude', 'openai', 'gemini', 'ollama', 'groq']:
             ConfigManager.console_print(f"Unsupported API type: {api_type}")
             return []
         
@@ -666,7 +759,7 @@ class LLMProcessor:
         if api_type != 'ollama':
             api_key_map = {
                 'claude': 'claude',
-                'chatgpt': 'openai_llm',
+                'openai': 'openai_llm',
                 'gemini': 'gemini',
                 'groq': 'groq'
             }
@@ -704,7 +797,7 @@ class LLMProcessor:
                     return models
                 ConfigManager.console_print(f"Claude API error: {response.status_code} - {response.text}")
                 
-            elif api_type == 'chatgpt':
+            elif api_type == 'openai':
                 import openai
                 openai.api_key = api_key
                 

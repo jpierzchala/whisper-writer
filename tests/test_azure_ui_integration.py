@@ -9,8 +9,9 @@ def test_settings_window_azure_llm_provider_options():
     
     # Test the provider options mapping
     provider_fields = {
-        'chatgpt': ['openai_api_key'],
-        'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint', 
+        'openai': ['openai_api_key'],
+        'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint',
+                       'azure_openai_llm_cleanup_deployment_name', 'azure_openai_llm_instruction_deployment_name',
                        'azure_openai_llm_deployment_name', 'azure_openai_llm_api_version'],
         'claude': ['claude_api_key'],
         'gemini': ['gemini_api_key'],
@@ -23,6 +24,8 @@ def test_settings_window_azure_llm_provider_options():
     expected_fields = [
         'azure_openai_llm_api_key', 
         'azure_openai_llm_endpoint',
+        'azure_openai_llm_cleanup_deployment_name',
+        'azure_openai_llm_instruction_deployment_name',
         'azure_openai_llm_deployment_name', 
         'azure_openai_llm_api_version'
     ]
@@ -131,6 +134,8 @@ def test_config_schema_azure_openai_llm_fields():
                 'azure_openai_llm_endpoint': {'type': 'str'},
                 'azure_openai_llm_api_version': {'type': 'str'},
                 'azure_openai_llm_deployment_name': {'type': 'str'},
+                'azure_openai_llm_cleanup_deployment_name': {'type': 'str'},
+                'azure_openai_llm_instruction_deployment_name': {'type': 'str'},
                 'azure_openai_llm_api_key': {'type': 'str'}
             }
         }
@@ -154,6 +159,8 @@ def test_config_schema_azure_openai_llm_fields():
             'azure_openai_llm_endpoint',
             'azure_openai_llm_api_version', 
             'azure_openai_llm_deployment_name',
+            'azure_openai_llm_cleanup_deployment_name',
+            'azure_openai_llm_instruction_deployment_name',
             'azure_openai_llm_api_key'
         ]
         
@@ -168,13 +175,35 @@ def test_config_schema_azure_openai_llm_fields():
     required_azure_fields = [
         'azure_openai_llm_api_key',
         'azure_openai_llm_endpoint',
-        'azure_openai_llm_deployment_name', 
+        'azure_openai_llm_deployment_name',
+        'azure_openai_llm_cleanup_deployment_name',
+        'azure_openai_llm_instruction_deployment_name',
         'azure_openai_llm_api_version'
     ]
     
     for field in required_azure_fields:
         assert field in llm_section, f"Missing Azure OpenAI LLM field in schema: {field}"
         assert llm_section[field]['type'] == 'str', f"Field {field} should be string type"
+
+def test_settings_window_combobox_value_helper_prefers_data():
+    from ui.settings_window import SettingsWindow
+
+    class DummyCombo:
+        def __init__(self, data, text):
+            self._data = data
+            self._text = text
+
+        def currentData(self):
+            return self._data
+
+        def currentText(self):
+            return self._text
+
+    with_data = DummyCombo('openai', 'OpenAI API')
+    without_data = DummyCombo(None, 'Azure OpenAI')
+
+    assert SettingsWindow._get_combobox_value(with_data) == 'openai'
+    assert SettingsWindow._get_combobox_value(without_data) == 'Azure OpenAI'
 
 def test_settings_window_toggle_function_logic():
     """Test the logic of provider toggle functions."""
@@ -183,8 +212,9 @@ def test_settings_window_toggle_function_logic():
     def simulate_toggle_llm_provider_options(provider):
         """Simulate the settings window toggle function logic."""
         provider_fields = {
-            'chatgpt': ['openai_api_key'],
-            'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint', 
+            'openai': ['openai_api_key'],
+            'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint',
+                           'azure_openai_llm_cleanup_deployment_name', 'azure_openai_llm_instruction_deployment_name',
                            'azure_openai_llm_deployment_name', 'azure_openai_llm_api_version'],
             'claude': ['claude_api_key'],
             'gemini': ['gemini_api_key'],
@@ -213,6 +243,8 @@ def test_settings_window_toggle_function_logic():
     azure_fields = [
         'azure_openai_llm_api_key', 
         'azure_openai_llm_endpoint',
+        'azure_openai_llm_cleanup_deployment_name',
+        'azure_openai_llm_instruction_deployment_name',
         'azure_openai_llm_deployment_name', 
         'azure_openai_llm_api_version'
     ]

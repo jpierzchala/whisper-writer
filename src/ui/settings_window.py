@@ -23,6 +23,15 @@ TEXT_INPUT_WIDGET_TYPES = tuple(
 )
 QWIDGET_IS_TYPE = isinstance(QWidget, type)
 QLINEEDIT_IS_TYPE = isinstance(QLineEdit, type)
+REASONING_MODEL_PREFIXES = ('gpt-5', 'o1')
+API_TYPE_LABELS = {
+    'openai': 'OpenAI API',
+    'azure_openai': 'Azure OpenAI',
+    'claude': 'Anthropic Claude',
+    'gemini': 'Google Gemini',
+    'groq': 'Groq',
+    'ollama': 'Ollama (local)'
+}
 
 load_dotenv()
 
@@ -79,6 +88,7 @@ class SettingsWindow(BaseWindow):
         # Initialize provider-specific option visibility
         self.toggle_llm_provider_options()
         self.toggle_transcription_provider_options()
+        self.update_temperature_visibility()
 
     def create_tabs(self):
         """Create tabs for each category in the schema."""
@@ -162,6 +172,12 @@ class SettingsWindow(BaseWindow):
                 label = QLabel("Cleanup Model:")  # Changed from just "Model:"
             elif key == 'instruction_model':
                 label = QLabel("Instruction Model:")
+            elif key == 'azure_openai_llm_cleanup_deployment_name':
+                label = QLabel("Azure Cleanup Deployment:")
+            elif key == 'azure_openai_llm_instruction_deployment_name':
+                label = QLabel("Azure Instruction Deployment:")
+            elif key == 'azure_openai_llm_deployment_name':
+                label = QLabel("Azure Deployment (legacy fallback):")
             else:
                 label = QLabel(f"{key.replace('_', ' ').capitalize()}:")
         else:
@@ -299,11 +315,18 @@ class SettingsWindow(BaseWindow):
                 return container
             
             elif key == 'api_type':
-                widget = self.create_combobox(current_value, meta['options'])
-                widget.setObjectName('llm_post_processing_api_type_input')
-                widget.currentTextChanged.connect(self.refresh_model_choices)
-                widget.currentTextChanged.connect(self.toggle_llm_provider_options)
-                return widget
+                combo = QComboBox()
+                combo.setObjectName('llm_post_processing_api_type_input')
+                for option in meta['options']:
+                    label = API_TYPE_LABELS.get(option, option.replace('_', ' ').title())
+                    combo.addItem(label, option)
+                index = combo.findData(current_value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                combo.currentIndexChanged.connect(self.refresh_model_choices)
+                combo.currentIndexChanged.connect(self.toggle_llm_provider_options)
+                combo.currentIndexChanged.connect(self.update_temperature_visibility)
+                return combo
             elif key in ['cleanup_model', 'instruction_model']:
                 return self._create_model_combobox(key, current_value)
             elif key == 'model':
@@ -369,6 +392,9 @@ class SettingsWindow(BaseWindow):
             self.cleanup_model_combo = combo
         else:
             self.instruction_model_combo = combo
+
+        combo.currentTextChanged.connect(self.update_temperature_visibility)
+        self.update_temperature_visibility()
 
         return combo
 
@@ -609,7 +635,11 @@ class SettingsWindow(BaseWindow):
         if isinstance(widget, QCheckBox):
             widget.setChecked(value)
         elif isinstance(widget, QComboBox):
-            widget.setCurrentText(value)
+            index = widget.findData(value)
+            if index == -1 and value is not None:
+                index = widget.findText(str(value))
+            if index >= 0:
+                widget.setCurrentIndex(index)
         elif isinstance(widget, QLineEdit):
             widget.setText(str(value) if value is not None else '')
         elif isinstance(widget, QTextEdit):  # Add handling for QTextEdit
@@ -625,7 +655,7 @@ class SettingsWindow(BaseWindow):
         if isinstance(widget, QCheckBox):
             return widget.isChecked()
         elif isinstance(widget, QComboBox):
-            return widget.currentText() or None
+            return self._get_combobox_value(widget)
         elif isinstance(widget, QLineEdit):
             text = widget.text()
             if value_type == 'int':
@@ -642,6 +672,42 @@ class SettingsWindow(BaseWindow):
             if isinstance(line_edit, QLineEdit):
                 return line_edit.text() or None
         return None
+
+    def update_temperature_visibility(self):
+        temp_widget = self.findChild(QWidget, 'llm_post_processing_temperature_input')
+        temp_label = self.findChild(QLabel, 'llm_post_processing_temperature_label')
+        temp_help = self.findChild(QToolButton, 'llm_post_processing_temperature_help')
+        should_hide = self._should_hide_temperature()
+        for element in (temp_widget, temp_label, temp_help):
+            if element:
+                element.setVisible(not should_hide)
+
+    def _should_hide_temperature(self) -> bool:
+        provider_combo = self.findChild(QComboBox, 'llm_post_processing_api_type_input')
+        provider = self._get_combobox_value(provider_combo)
+        if provider not in ('openai', 'azure_openai'):
+            return False
+        selected_models = []
+        for combo in (self.cleanup_model_combo, self.instruction_model_combo):
+            if combo:
+                selected_models.append(self._get_combobox_value(combo))
+        return any(self._is_reasoning_model(value) for value in selected_models if value)
+
+    @staticmethod
+    def _is_reasoning_model(value: str) -> bool:
+        if not value:
+            return False
+        lowered = value.strip().lower()
+        return any(lowered.startswith(prefix) for prefix in REASONING_MODEL_PREFIXES)
+
+    @staticmethod
+    def _get_combobox_value(combo: QComboBox | None):
+        if not combo:
+            return None
+        data = combo.currentData()
+        if data is not None:
+            return data
+        return combo.currentText() or None
 
     def toggle_api_local_options(self, use_api):
         """Toggle visibility of API and local options."""
@@ -745,7 +811,7 @@ class SettingsWindow(BaseWindow):
             ConfigManager.console_print("Error: API type combo box not found")
             return
             
-        api_type = api_type_combo.currentText()
+        api_type = self._get_combobox_value(api_type_combo)
         ConfigManager.console_print(f"Selected API type: {api_type}")
         
         # Initialize LLM processor if needed
@@ -822,7 +888,7 @@ class SettingsWindow(BaseWindow):
             ConfigManager.console_print("Cleared combo box")
             
             combo_options = list(models or [])
-            if not combo_options and self.llm_processor and self.llm_processor.api_type == 'chatgpt':
+            if not combo_options and self.llm_processor and self.llm_processor.api_type == 'openai':
                 combo_options = self._default_llm_model_choices()
                 ConfigManager.console_print("Using default OpenAI model list for dropdown population")
             elif not combo_options:
@@ -869,6 +935,7 @@ class SettingsWindow(BaseWindow):
         # Force a UI update
         QApplication.processEvents()
         ConfigManager.console_print("=== UI update complete ===\n")
+        self.update_temperature_visibility()
 
     def showEvent(self, event):
         """Handle window show event to initialize models."""
@@ -940,7 +1007,7 @@ class SettingsWindow(BaseWindow):
         if provider is None:
             api_type_combo = self.findChild(QComboBox, 'llm_post_processing_api_type_input')
             if api_type_combo:
-                provider = api_type_combo.currentText()
+                provider = self._get_combobox_value(api_type_combo)
             else:
                 return
         
@@ -948,8 +1015,9 @@ class SettingsWindow(BaseWindow):
         
         # Map of provider to their specific API key fields
         provider_fields = {
-            'chatgpt': ['openai_api_key'],
-            'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint', 
+            'openai': ['openai_api_key'],
+            'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint',
+                           'azure_openai_llm_cleanup_deployment_name', 'azure_openai_llm_instruction_deployment_name',
                            'azure_openai_llm_deployment_name', 'azure_openai_llm_api_version'],
             'claude': ['claude_api_key'],
             'gemini': ['gemini_api_key'],
@@ -990,13 +1058,14 @@ class SettingsWindow(BaseWindow):
                     help_button.setVisible(True)
         
         ConfigManager.console_print(f"Finished toggling options for provider: {provider}")
+        self.update_temperature_visibility()
 
     def toggle_transcription_provider_options(self, provider=None):
         """Toggle visibility of transcription provider-specific options."""
         if provider is None:
             provider_combo = self.findChild(QComboBox, 'model_options_api_provider_input')
             if provider_combo:
-                provider = provider_combo.currentText()
+                provider = self._get_combobox_value(provider_combo)
             else:
                 return
         

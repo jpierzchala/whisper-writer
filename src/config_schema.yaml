@@ -240,11 +240,11 @@ llm_post_processing:
     description: "Enable post-processing of transcribed text through an LLM API"
   
   api_type:
-    value: chatgpt
+    value: openai
     type: str
     description: "The LLM API to use for post-processing. If Ollama is selected, local LLM processing will be used. Ollama must be installed separately."
     options:
-      - chatgpt
+      - openai
       - azure_openai
       - claude
       - gemini
@@ -275,6 +275,16 @@ llm_post_processing:
     value: null
     type: str
     description: "Deployment name for Azure OpenAI LLM model"
+    
+  azure_openai_llm_cleanup_deployment_name:
+    value: "gpt-4.1"
+    type: str
+    description: "Deployment name for the cleanup model when using Azure OpenAI"
+    
+  azure_openai_llm_instruction_deployment_name:
+    value: "gpt-4.1"
+    type: str
+    description: "Deployment name for the instruction model when using Azure OpenAI"
     
   azure_openai_llm_api_version:
     value: "2024-02-01"
