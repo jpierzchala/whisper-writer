@@ -94,11 +94,9 @@ class LLMProcessor:
         
         if not system_message:
             ConfigManager.console_print("Warning: No system message provided!")
-            # Fetch default from config schema
-            if self.is_instruction_mode:
-                system_message = ConfigManager.get_schema()['llm_post_processing']['instruction_system_message']['value']
-            else:
-                system_message = ConfigManager.get_schema()['llm_post_processing']['system_prompt']['value']
+            schema = ConfigManager.get_schema().get('llm_post_processing', {})
+            default_cleanup = (schema.get('system_prompt') or {}).get('value')
+            system_message = default_cleanup or ""
             ConfigManager.console_print(f"Using default system message: {system_message}", verbose=True)
         
         api_type = self.config['api_type']

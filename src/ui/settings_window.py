@@ -204,7 +204,8 @@ class SettingsWindow(BaseWindow):
             widget.setObjectName(widget_name)
         else:
             # If it's a layout (for model_path), set the object name on the QLineEdit
-            line_edit = widget.itemAt(0).widget()
+            layout = widget.layout() if hasattr(widget, 'layout') else None
+            line_edit = layout.itemAt(0).widget() if layout and layout.count() else None
             if QLINEEDIT_IS_TYPE and isinstance(line_edit, QLineEdit):
                 line_edit.setObjectName(widget_name)
             elif not QLINEEDIT_IS_TYPE and hasattr(line_edit, 'setObjectName'):
