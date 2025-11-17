@@ -294,12 +294,17 @@ llm_post_processing:
   cleanup_model:
     value: "gpt-4o-mini"
     type: str
-    description: "The model to use for text cleanup."
+    description: |
+      The OpenAI model to use for text cleanup. Supports GPT-5.1 via the Responses
+      API; when GPT-5.1 is selected the app automatically sends requests with
+      reasoning effort set to "none" for low-latency editing.
 
   instruction_model:
     value: "gpt-4o-mini"
     type: str
-    description: "The model to use for instruction mode."
+    description: |
+      The OpenAI model to use for instruction mode responses. GPT-5.1 is supported
+      via the Responses API with reasoning effort forced to "none" when selected.
     
   system_prompt:
     value: "You are a helpful assistant that cleans up transcribed text. Fix any grammar, punctuation, or formatting issues while maintaining the original meaning."
