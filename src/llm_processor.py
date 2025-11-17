@@ -54,6 +54,14 @@ class LLMProcessor:
                 self.api_type = 'claude'  # Only use claude as last resort fallback
         else:
             self.api_type = api_type
+
+        if self.api_type == 'chatgpt':
+            ConfigManager.console_print("Deprecated api_type 'chatgpt' detected, treating as 'openai'")
+            self.api_type = 'openai'
+            try:
+                ConfigManager.set_config_value('openai', 'llm_post_processing', 'api_type')
+            except Exception:
+                pass
         
         ConfigManager.console_print(f"Initializing LLM Processor with API type: {self.api_type}")
         
