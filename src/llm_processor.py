@@ -22,6 +22,8 @@ except Exception:  # pragma: no cover - optional dependency
 
 # Check if Ollama is available
 HAS_OLLAMA = ollama is not None
+RESPONSES_API_ENDPOINT = "https://api.openai.com/v1/responses"
+RESPONSES_MODEL_PREFIXES = ("gpt-5.1",)
 
 class LLMProcessor:
     def __init__(self, api_type=None):
@@ -202,6 +204,10 @@ class LLMProcessor:
         api_key = KeyringManager.get_api_key("openai_llm")
         ConfigManager.console_print(f"Using ChatGPT API key: {'[SET]' if api_key else '[NOT SET]'}")
         
+        if self._should_use_responses_api(model):
+            self._safe_console_print(f"Routing model {model} through the Responses API with reasoning effort 'none'")
+            return self._process_openai_responses(text, system_message, model, api_key)
+        
         headers = {
             'Authorization': f'Bearer {api_key}',
             'Content-Type': 'application/json'
@@ -243,6 +249,108 @@ class LLMProcessor:
             ConfigManager.console_print(f"Error in ChatGPT API call: {str(e)}")
         
         return text
+
+    def _should_use_responses_api(self, model: str) -> bool:
+        """Return True when the OpenAI Responses API should be used for this model."""
+        if not model:
+            return False
+        lowered = model.lower()
+        return any(lowered.startswith(prefix) for prefix in RESPONSES_MODEL_PREFIXES)
+
+    def _process_openai_responses(self, text: str, system_message: str, model: str, api_key: str) -> str:
+        """Invoke the OpenAI Responses API for GPT-5.1-class models."""
+        if not api_key:
+            ConfigManager.console_print("OpenAI API key not found for Responses API request")
+            return text
+
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+
+        messages = []
+        if system_message:
+            messages.append({
+                "role": "system",
+                "content": [
+                    {"type": "input_text", "text": system_message}
+                ]
+            })
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": text}
+            ]
+        })
+
+        payload = {
+            "model": model,
+            "input": messages,
+            "temperature": self.config.get('temperature', 0.3),
+            "max_output_tokens": 1024,
+            "reasoning": {
+                "effort": "none"
+            }
+        }
+
+        try:
+            response = requests.post(
+                RESPONSES_API_ENDPOINT,
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            self._safe_console_print(f"Responses API status code: {response.status_code}", verbose=True)
+
+            if response.status_code == 200:
+                response_data = response.json()
+                processed_text = self._extract_text_from_responses_output(response_data)
+                if processed_text:
+                    self._safe_console_print(f"Processed text from {model} via Responses API", verbose=True)
+                    return processed_text
+                self._safe_console_print(f"Unexpected Responses API payload: {response_data}", verbose=True)
+            else:
+                ConfigManager.console_print(f"Responses API error ({model}): {response.status_code} - {response.text}")
+        except Exception as exc:
+            ConfigManager.console_print(f"Error calling Responses API for model {model}: {exc}")
+
+        return text
+
+    @staticmethod
+    def _extract_text_from_responses_output(response_data: dict) -> str | None:
+        """Extract plain text from a Responses API payload."""
+        if not isinstance(response_data, dict):
+            return None
+
+        output_items = response_data.get("output") or []
+        collected = []
+
+        for item in output_items:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get("type")
+            if item_type == "message":
+                contents = item.get("content") or []
+                for block in contents:
+                    if isinstance(block, dict):
+                        block_type = block.get("type")
+                        if block_type in ("output_text", "text"):
+                            text_value = block.get("text")
+                            if text_value:
+                                collected.append(text_value)
+            elif item_type in ("output_text", "text"):
+                text_value = item.get("text")
+                if text_value:
+                    collected.append(text_value)
+
+        if not collected:
+            fallback = response_data.get("output_text")
+            if isinstance(fallback, str):
+                return fallback.strip()
+
+        processed = "".join(collected).strip()
+        return processed or None
         
     def _process_gemini(self, text: str, system_message: str, model: str) -> str:
         api_key = KeyringManager.get_api_key("gemini")

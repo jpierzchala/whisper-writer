@@ -1,6 +1,7 @@
 import os
 import sys
 from dotenv import set_key, load_dotenv
+from PyQt5 import QtWidgets
 from PyQt5.QtWidgets import (
     QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
     QMessageBox, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog, QTextEdit, QSpinBox, QScrollArea
@@ -10,11 +11,18 @@ from PyQt5.QtGui import QFont, QIntValidator
 import sounddevice as sd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from ui.base_window import BaseWindow
+from ui.base_window import BaseWindow, QT_WIDGETS_ARE_MOCKED
 from utils import ConfigManager
 from keyring_manager import KeyringManager
 from llm_processor import LLMProcessor
 from ui.model_refresh_worker import ModelRefreshWorker
+
+TEXT_INPUT_WIDGET_TYPES = tuple(
+    widget_type for widget_type in (QLineEdit, QComboBox, QTextEdit, QSpinBox)
+    if isinstance(widget_type, type)
+)
+QWIDGET_IS_TYPE = isinstance(QWidget, type)
+QLINEEDIT_IS_TYPE = isinstance(QLineEdit, type)
 
 load_dotenv()
 
@@ -25,28 +33,33 @@ class SettingsWindow(BaseWindow):
     def __init__(self):
         """Initialize the settings window."""
         super().__init__('Settings', 800, 800)  # Reduced height from 1050 to 800
+        ConfigManager.initialize()
         self.schema = ConfigManager.get_schema()
         self.llm_processor = None  # Initialize to None
         self.model_combo = None
+        self.cleanup_model_combo = None
+        self.instruction_model_combo = None
         self.refresh_thread = None  # Add thread reference
-        self.init_settings_ui()
-        
-        # Check if we're in API mode (no GPU tools available)
-        try:
-            import faster_whisper
-            has_faster_whisper = True
-        except ImportError:
-            has_faster_whisper = False
-        
-        try:
-            import vosk
-            has_vosk = True
-        except ImportError:
-            has_vosk = False
-        
-        # If neither is available, set API mode
-        if not has_faster_whisper and not has_vosk:
-            self.set_api_mode(True)
+        self.headless_mode = QT_WIDGETS_ARE_MOCKED
+        if not self.headless_mode:
+            self.init_settings_ui()
+            
+            # Check if we're in API mode (no GPU tools available)
+            try:
+                import faster_whisper
+                has_faster_whisper = True
+            except ImportError:
+                has_faster_whisper = False
+            
+            try:
+                import vosk
+                has_vosk = True
+            except ImportError:
+                has_vosk = False
+            
+            # If neither is available, set API mode
+            if not has_faster_whisper and not has_vosk:
+                self.set_api_mode(True)
 
     def init_settings_ui(self):
         """Initialize the settings user interface."""
@@ -160,7 +173,9 @@ class SettingsWindow(BaseWindow):
             return
 
         # Set larger font for the widget if it's a text-based widget
-        if isinstance(widget, (QLineEdit, QComboBox, QTextEdit, QSpinBox)):
+        if TEXT_INPUT_WIDGET_TYPES and isinstance(widget, TEXT_INPUT_WIDGET_TYPES):
+            widget.setFont(QFont('Segoe UI', 11))
+        elif not TEXT_INPUT_WIDGET_TYPES and hasattr(widget, 'setFont'):
             widget.setFont(QFont('Segoe UI', 11))
 
         label.setFont(QFont('Segoe UI', 11))
@@ -181,12 +196,18 @@ class SettingsWindow(BaseWindow):
         label.setObjectName(label_name)
         help_button.setObjectName(help_name)
         
-        if isinstance(widget, QWidget):
+        is_widget_like = QWIDGET_IS_TYPE and isinstance(widget, QWidget)
+        if not is_widget_like and not QWIDGET_IS_TYPE and hasattr(widget, 'setObjectName'):
+            is_widget_like = True
+        
+        if is_widget_like:
             widget.setObjectName(widget_name)
         else:
             # If it's a layout (for model_path), set the object name on the QLineEdit
             line_edit = widget.itemAt(0).widget()
-            if isinstance(line_edit, QLineEdit):
+            if QLINEEDIT_IS_TYPE and isinstance(line_edit, QLineEdit):
+                line_edit.setObjectName(widget_name)
+            elif not QLINEEDIT_IS_TYPE and hasattr(line_edit, 'setObjectName'):
                 line_edit.setObjectName(widget_name)
 
     def create_widget_for_type(self, key, meta, category, sub_category):
@@ -283,10 +304,7 @@ class SettingsWindow(BaseWindow):
                 widget.currentTextChanged.connect(self.toggle_llm_provider_options)
                 return widget
             elif key in ['cleanup_model', 'instruction_model']:
-                widget = QLineEdit(current_value or '')
-                widget.setObjectName(f'llm_post_processing_{key}_input')
-                widget.setPlaceholderText(f"Enter {key.replace('_', ' ')} name")
-                return widget
+                return self._create_model_combobox(key, current_value)
             elif key == 'model':
                 widget = QLineEdit(current_value or '')
                 widget.setObjectName('llm_post_processing_model_input')
@@ -309,7 +327,8 @@ class SettingsWindow(BaseWindow):
         return None
 
     def create_checkbox(self, value, key):
-        widget = QCheckBox()
+        checkbox_class = getattr(QtWidgets, 'QCheckBox', QCheckBox)
+        widget = checkbox_class()
         widget.setChecked(value)
         if key == 'use_api':
             widget.setObjectName('model_options_use_api_input')
@@ -320,6 +339,50 @@ class SettingsWindow(BaseWindow):
                 widget.setEnabled(False)
                 widget.setToolTip("Autostart is only supported on Windows")
         return widget
+
+    def _create_model_combobox(self, key, current_value):
+        """Create a combo box for model selection with default and fetched options."""
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        combo.setObjectName(f'llm_post_processing_{key}_input')
+
+        placeholder = "Select cleanup model" if key == 'cleanup_model' else "Select instruction model"
+        if combo.lineEdit():
+            combo.lineEdit().setPlaceholderText(placeholder)
+
+        for model_name in self._default_llm_model_choices():
+            combo.addItem(model_name)
+
+        if current_value:
+            index = combo.findText(current_value)
+            if index == -1:
+                combo.insertItem(0, current_value)
+                index = 0
+            combo.setCurrentIndex(index)
+        elif combo.count() > 0:
+            combo.setCurrentIndex(0)
+
+        if key == 'cleanup_model':
+            self.cleanup_model_combo = combo
+        else:
+            self.instruction_model_combo = combo
+
+        return combo
+
+    @staticmethod
+    def _default_llm_model_choices():
+        """Return a curated list of OpenAI model IDs for quick selection."""
+        return [
+            'gpt-5.1',
+            'gpt-5.1-mini',
+            'gpt-4.1',
+            'gpt-4.1-mini',
+            'gpt-4o',
+            'gpt-4o-mini',
+            'gpt-3.5-turbo'
+        ]
 
     def create_combobox(self, value, options):
         widget = QComboBox()
@@ -358,7 +421,10 @@ class SettingsWindow(BaseWindow):
 
     def create_help_button(self, description):
         help_button = QToolButton()
-        help_button.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxQuestion))
+        if hasattr(self, 'style'):
+            style_obj = self.style()
+            if style_obj and hasattr(style_obj, 'standardIcon'):
+                help_button.setIcon(style_obj.standardIcon(QStyle.SP_MessageBoxQuestion))
         help_button.setAutoRaise(True)
         help_button.setToolTip(description)
         help_button.setCursor(Qt.PointingHandCursor)
@@ -740,9 +806,9 @@ class SettingsWindow(BaseWindow):
             
             ConfigManager.console_print(f"\nUpdating combo box: {combo.objectName()}")
             ConfigManager.console_print(f"Combo box exists: {combo is not None}")
-            ConfigManager.console.print(f"Combo box visible: {combo.isVisible()}")
-            ConfigManager.console.print(f"Combo box enabled: {combo.isEnabled()}")
-            ConfigManager.console.print(f"Current items: {[combo.itemText(i) for i in range(combo.count())]}")
+            ConfigManager.console_print(f"Combo box visible: {combo.isVisible()}")
+            ConfigManager.console_print(f"Combo box enabled: {combo.isEnabled()}")
+            ConfigManager.console_print(f"Current items: {[combo.itemText(i) for i in range(combo.count())]}")
             
             # Store current state
             was_enabled = combo.isEnabled()
@@ -754,27 +820,38 @@ class SettingsWindow(BaseWindow):
             combo.clear()
             ConfigManager.console_print("Cleared combo box")
             
-            if models:
-                ConfigManager.console_print(f"Adding {len(models)} models to combo box")
-                for model in models:
-                    combo.addItem(str(model))
-                    ConfigManager.console_print(f"Added model: {model}")
-                
-                # Get the appropriate config value
-                config_key = 'cleanup_model' if combo == self.cleanup_model_combo else 'instruction_model'
-                current_model = ConfigManager.get_config_value('llm_post_processing', config_key)
-                ConfigManager.console_print(f"Config model: {current_model}")
-                
-                if current_model in models:
-                    combo.setCurrentText(current_model)
-                    ConfigManager.console_print(f"Set to config model: {current_model}")
-                else:
-                    combo.setCurrentIndex(0)
-                    ConfigManager.console_print(f"Set to first model: {combo.currentText()}")
-            else:
-                message = "No models found - Is Ollama running?" if self.llm_processor.api_type == 'ollama' else "No models available - Check API key"
+            combo_options = list(models or [])
+            if not combo_options and self.llm_processor and self.llm_processor.api_type == 'chatgpt':
+                combo_options = self._default_llm_model_choices()
+                ConfigManager.console_print("Using default OpenAI model list for dropdown population")
+            elif not combo_options:
+                message = "No models found - Is Ollama running?" if self.llm_processor and self.llm_processor.api_type == 'ollama' else "No models available - Check API key"
                 combo.addItem(message)
                 ConfigManager.console_print(f"Added message: {message}")
+            
+            for model_option in combo_options:
+                combo.addItem(str(model_option))
+                ConfigManager.console_print(f"Added model: {model_option}")
+            
+            # Determine the desired selection preference
+            desired_text = current_text or ''
+            if not desired_text:
+                config_key = 'cleanup_model' if combo == self.cleanup_model_combo else 'instruction_model'
+                desired_text = ConfigManager.get_config_value('llm_post_processing', config_key) or ''
+                ConfigManager.console_print(f"Config model fallback for {config_key}: {desired_text}")
+            
+            if desired_text:
+                index = combo.findText(desired_text)
+                if index == -1 and combo_options:
+                    combo.insertItem(0, desired_text)
+                    index = 0
+                    ConfigManager.console_print(f"Inserted custom model at top: {desired_text}")
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                    ConfigManager.console_print(f"Set combo selection to: {desired_text}")
+            elif combo.count() > 0:
+                combo.setCurrentIndex(0)
+                ConfigManager.console_print(f"Defaulted combo selection to: {combo.currentText()}")
             
             # Restore state and force update
             combo.setEnabled(True)
@@ -785,8 +862,8 @@ class SettingsWindow(BaseWindow):
             ConfigManager.console_print(f"Final state - count: {combo.count()}")
             ConfigManager.console_print(f"Final items: {[combo.itemText(i) for i in range(combo.count())]}")
             ConfigManager.console_print(f"Current text: {combo.currentText()}")
-            ConfigManager.console.print(f"Enabled: {combo.isEnabled()}")
-            ConfigManager.console.print(f"Visible: {combo.isVisible()}")
+            ConfigManager.console_print(f"Enabled: {combo.isEnabled()}")
+            ConfigManager.console_print(f"Visible: {combo.isVisible()}")
         
         # Force a UI update
         QApplication.processEvents()
