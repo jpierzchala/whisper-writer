@@ -267,7 +267,7 @@ def test_azure_openai_provider_switching():
     providers = [
         {
             'name': 'ChatGPT',
-            'api_type': 'chatgpt',
+            'api_type': 'openai',
             'required_fields': ['openai_api_key']
         },
         {

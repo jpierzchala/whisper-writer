@@ -234,8 +234,8 @@ The first time you open the app, if a configuration file doesn't exist, a Settin
 
 #### LLM Post-processing Options
 - `enabled`: Set to `true` to enable LLM post-processing. (Default: `false`)
-- `api_type`: The LLM API to use for post-processing. (Default: `chatgpt`)
-  - `chatgpt`: Use OpenAI's ChatGPT API.
+- `api_type`: The LLM API to use for post-processing. (Default: `openai`)
+  - `openai`: Use OpenAI's API.
   - `claude`: Use Anthropic's Claude API.
   - `gemini`: Use Google's Gemini API.
   - `groq`: Use Groq's LLM service.
