@@ -362,6 +362,7 @@ def transcribe_with_azure_openai(audio_data, api_options):
         if not deployment_name:
             ConfigManager.console_print("Azure OpenAI deployment name not configured")
             return ''
+        ConfigManager.console_print(f"Using Azure OpenAI deployment: {deployment_name}")
             
         # Construct Azure OpenAI URL  
         base_url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment_name}/audio/transcriptions"
@@ -391,7 +392,9 @@ def transcribe_with_azure_openai(audio_data, api_options):
             'api-version': api_version
         }
         
-        ConfigManager.console_print(f"Sending request to Azure OpenAI API using {model}...")
+        ConfigManager.console_print(
+            f"Sending request to Azure OpenAI API using deployment {deployment_name} with model parameter {model}..."
+        )
         response = requests.post(
             base_url,
             headers={'api-key': api_key},  # Simplified headers for Azure OpenAI

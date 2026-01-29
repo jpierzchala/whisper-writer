@@ -144,7 +144,16 @@ class LLMProcessor:
                 model = default_models.get(api_type)
             ConfigManager.console_print(f"No model specified, using default {mode} model for {api_type}: {model}")
         
-        self._safe_console_print(f"Processing text with {api_type} using {mode} model: {model}")
+        azure_deployment = None
+        if api_type == 'azure_openai':
+            azure_deployment = self._get_azure_deployment_name(mode)
+
+        if api_type == 'azure_openai' and azure_deployment:
+            self._safe_console_print(
+                f"Processing text with {api_type} using {mode} deployment: {azure_deployment} (model setting: {model})"
+            )
+        else:
+            self._safe_console_print(f"Processing text with {api_type} using {mode} model: {model}")
         if mode == "cleanup" and not ConfigManager.should_log_cleanup_prompt():
             self._safe_console_print("Using cleanup system message (logging disabled)", verbose=True)
         else:
@@ -579,6 +588,7 @@ class LLMProcessor:
         if not deployment_name:
             ConfigManager.console_print("Azure OpenAI LLM deployment name not configured")
             return text
+        ConfigManager.console_print(f"Using Azure OpenAI LLM deployment: {deployment_name}")
         headers = {
             'api-key': api_key,
             'Content-Type': 'application/json'

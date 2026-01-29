@@ -269,18 +269,34 @@ class WhisperWriterApp(QObject):
                         ConfigManager.console_print("Final cleanup system message prepared for LLM", verbose=True)
                     else:
                         ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}", verbose=True)
+                    original_result = result
                     processed_result = self.llm_processor.process_text(result, system_message)
+                    if processed_result is not None:
+                        ConfigManager.console_print(f"Cleanup raw output: {processed_result}", verbose=True)
                     if processed_result:
                         result = processed_result.strip()
+                        if result == original_result:
+                            ConfigManager.console_print("Cleanup output matches original transcription", verbose=True)
+                        else:
+                            ConfigManager.console_print("Cleanup output differs from original transcription", verbose=True)
                     else:
-                        ConfigManager.console_print("LLM processing failed, using original transcription")
+                        ConfigManager.console_print("LLM processing failed or returned empty output, using original transcription")
+                        result = original_result
                     
                 except Exception as e:
                     ConfigManager.console_print(f"Error processing text through LLM: {str(e)}")
                     return result
 
             # Type the result
-            self.input_simulator.typewrite(result)
+            typed_result = False
+            try:
+                ConfigManager.console_print(f"Typing transcription result length: {len(result)}", verbose=True)
+                self.input_simulator.typewrite(result)
+                typed_result = True
+            except Exception as e:
+                ConfigManager.console_print(f"Error typing transcription result: {str(e)}")
+            finally:
+                ConfigManager.console_print(f"Typed transcription result: {typed_result}", verbose=True)
             
             if ConfigManager.get_config_value('misc', 'noise_on_completion'):
                 AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
@@ -364,8 +380,10 @@ class WhisperWriterApp(QObject):
             
             # Run through LLM cleanup
             cleaned_text = self.llm_processor.process_text(clipboard_text, system_message)
+            ConfigManager.console_print(f"Cleanup output (clipboard): {cleaned_text}", verbose=True)
             
             if cleaned_text and cleaned_text != clipboard_text:
+                paste_succeeded = False
                 try:
                     # Simulate keyboard events with proper cleanup
                     keyboard = Controller()
@@ -385,6 +403,8 @@ class WhisperWriterApp(QObject):
                         with keyboard.pressed(Key.ctrl):
                             keyboard.press('v')
                             keyboard.release('v')
+
+                        paste_succeeded = True
                         
                         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
                             AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
@@ -411,8 +431,11 @@ class WhisperWriterApp(QObject):
                     
                 except Exception as e:
                     ConfigManager.console_print(f"Error simulating keyboard: {str(e)}")
+                finally:
+                    ConfigManager.console_print(f"Pasted cleaned clipboard text: {paste_succeeded}", verbose=True)
             else:
                 ConfigManager.console_print("Text unchanged after LLM processing")
+                ConfigManager.console_print("Cleanup output empty or unchanged; no paste performed", verbose=True)
             
         except Exception as e:
             ConfigManager.console_print(f"Error cleaning text: {str(e)}")
