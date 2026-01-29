@@ -370,3 +370,7 @@ misc:
     value: false
     type: bool
     description: "Enable verbose logging including full prompts, system messages, and API responses"
+  log_cleanup_prompt:
+    value: false
+    type: bool
+    description: "When verbose logging is enabled, include cleanup system prompts in logs"

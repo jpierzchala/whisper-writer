@@ -107,7 +107,10 @@ class LLMProcessor:
             schema = ConfigManager.get_schema().get('llm_post_processing', {})
             default_cleanup = (schema.get('system_prompt') or {}).get('value')
             system_message = default_cleanup or ""
-            ConfigManager.console_print(f"Using default system message: {system_message}", verbose=True)
+            if ConfigManager.should_log_cleanup_prompt():
+                ConfigManager.console_print(f"Using default system message: {system_message}", verbose=True)
+            else:
+                ConfigManager.console_print("Using default cleanup system message", verbose=True)
         
         api_type = self.config['api_type']
         
@@ -142,7 +145,10 @@ class LLMProcessor:
             ConfigManager.console_print(f"No model specified, using default {mode} model for {api_type}: {model}")
         
         self._safe_console_print(f"Processing text with {api_type} using {mode} model: {model}")
-        self._safe_console_print(f"Using system message: {system_message}", verbose=True)
+        if mode == "cleanup" and not ConfigManager.should_log_cleanup_prompt():
+            self._safe_console_print("Using cleanup system message (logging disabled)", verbose=True)
+        else:
+            self._safe_console_print(f"Using system message: {system_message}", verbose=True)
         
         if api_type == 'claude':
             return self._process_claude(text, system_message, model)

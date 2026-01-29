@@ -235,8 +235,12 @@ class WhisperWriterApp(QObject):
                     
                     # Start with a clean system message
                     system_message = base_message.strip() if base_message else ""
+                    log_cleanup_prompt = ConfigManager.should_log_cleanup_prompt()
                     
-                    ConfigManager.console_print(f"Retrieved {mode_name} base message from settings: {system_message}", verbose=True)
+                    if mode_name == "cleanup" and not log_cleanup_prompt:
+                        ConfigManager.console_print("Retrieved cleanup base message from settings", verbose=True)
+                    else:
+                        ConfigManager.console_print(f"Retrieved {mode_name} base message from settings: {system_message}", verbose=True)
                     
                     if not file_path:
                         ConfigManager.console_print("No file path set, using only the system message from settings")
@@ -261,7 +265,10 @@ class WhisperWriterApp(QObject):
                         ConfigManager.console_print("Warning: No system message found, using original transcription")
                         return result
                     
-                    ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}", verbose=True)
+                    if mode_name == "cleanup" and not log_cleanup_prompt:
+                        ConfigManager.console_print("Final cleanup system message prepared for LLM", verbose=True)
+                    else:
+                        ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}", verbose=True)
                     processed_result = self.llm_processor.process_text(result, system_message)
                     if processed_result:
                         result = processed_result.strip()
@@ -324,8 +331,12 @@ class WhisperWriterApp(QObject):
             
             # Start with a clean system message
             system_message = base_message.strip() if base_message else ""
+            log_cleanup_prompt = ConfigManager.should_log_cleanup_prompt()
             
-            ConfigManager.console_print(f"Base cleanup system message: {system_message}", verbose=True)
+            if log_cleanup_prompt:
+                ConfigManager.console_print(f"Base cleanup system message: {system_message}", verbose=True)
+            else:
+                ConfigManager.console_print("Base cleanup system message retrieved", verbose=True)
             
             # Append file contents if file path exists and is not empty
             if file_path and os.path.exists(file_path):
@@ -346,7 +357,10 @@ class WhisperWriterApp(QObject):
                 ConfigManager.console_print("Warning: No cleanup system message found")
                 return
             
-            ConfigManager.console_print(f"Final cleanup system message: {system_message}", verbose=True)
+            if log_cleanup_prompt:
+                ConfigManager.console_print(f"Final cleanup system message: {system_message}", verbose=True)
+            else:
+                ConfigManager.console_print("Final cleanup system message prepared", verbose=True)
             
             # Run through LLM cleanup
             cleaned_text = self.llm_processor.process_text(clipboard_text, system_message)
