@@ -231,6 +231,16 @@ class ConfigManager:
         return cls._instance.config.get('misc', {}).get('verbose_mode', False)
 
     @classmethod
+    def should_log_cleanup_prompt(cls):
+        """Return True when cleanup prompt logging is enabled for this session."""
+        if cls._instance is None:
+            return False
+        config = cls._instance.config.get('misc', {})
+        if not config.get('verbose_mode', False):
+            return False
+        return config.get('log_cleanup_prompt', False)
+
+    @classmethod
     def reload_logging(cls):
         """Reload logging configuration after config changes."""
         cls._setup_logging()
