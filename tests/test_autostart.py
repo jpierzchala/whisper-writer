@@ -105,7 +105,7 @@ class TestAutostartConfiguration(unittest.TestCase):
     
     def test_autostart_config_default_value(self):
         """Test that autostart has correct default value."""
-        default_value = ConfigManager.get_config_value('misc', 'autostart_on_login')
+        default_value = ConfigManager._instance.load_default_config()['misc']['autostart_on_login']
         self.assertEqual(default_value, False)
     
     def test_autostart_config_set_value(self):

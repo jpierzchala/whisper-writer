@@ -313,6 +313,9 @@ class KeyListener:
         """Initialize the KeyListener with backends and activation keys."""
         self.backends = []
         self.active_backend = None
+        self.is_running = False
+        self.start_count = 0
+        self.stop_count = 0
         self.main_key_chord = None
         self.llm_key_chord = None
         self.llm_instruction_key_chord = None
@@ -383,14 +386,49 @@ class KeyListener:
     def start(self):
         """Start the active backend."""
         if self.active_backend:
-            self.active_backend.start()
+            if self.is_running:
+                ConfigManager.console_print(
+                    f"Key listener start requested while already running on {type(self.active_backend).__name__}; ignoring duplicate start.",
+                    verbose=True
+                )
+                return False
+
+            started = self.active_backend.start()
+            self.is_running = getattr(self.active_backend, 'is_running', started is not False)
+            if started is False:
+                return False
+
+            self.start_count += 1
+            ConfigManager.console_print(
+                f"Key listener started on {type(self.active_backend).__name__} (starts={self.start_count}, stops={self.stop_count}).",
+                verbose=True
+            )
+            return True
         else:
             raise RuntimeError("No active backend selected")
 
     def stop(self):
         """Stop the active backend."""
         if self.active_backend:
-            self.active_backend.stop()
+            if not self.is_running:
+                ConfigManager.console_print(
+                    f"Key listener stop requested while already stopped on {type(self.active_backend).__name__}; ignoring duplicate stop.",
+                    verbose=True
+                )
+                return False
+
+            stopped = self.active_backend.stop()
+            self.is_running = getattr(self.active_backend, 'is_running', False)
+            if stopped is False:
+                return False
+
+            self.stop_count += 1
+            ConfigManager.console_print(
+                f"Key listener stopped on {type(self.active_backend).__name__} (starts={self.start_count}, stops={self.stop_count}).",
+                verbose=True
+            )
+            return True
+        return False
 
     def load_activation_keys(self):
         """Load activation keys from configuration."""
@@ -554,9 +592,14 @@ class EvdevBackend(InputBackend):
         self.evdev = None
         self.thread: Optional[threading.Thread] = None
         self.stop_event: Optional[threading.Event] = None
+        self.is_running = False
 
     def start(self):
         """Start the evdev backend."""
+        if self.is_running:
+            ConfigManager.console_print("Evdev backend already running; ignoring duplicate start.", verbose=True)
+            return False
+
         import evdev
         import threading
         self.evdev = evdev
@@ -567,6 +610,9 @@ class EvdevBackend(InputBackend):
         self.stop_event = threading.Event()
         self._setup_signal_handler()
         self._start_listening()
+        self.is_running = True
+        ConfigManager.console_print("Evdev backend started.", verbose=True)
+        return True
 
     def _setup_signal_handler(self):
         """Set up signal handlers for graceful shutdown."""
@@ -581,6 +627,10 @@ class EvdevBackend(InputBackend):
 
     def stop(self):
         """Stop the evdev backend and clean up resources."""
+        if not self.is_running:
+            ConfigManager.console_print("Evdev backend already stopped; ignoring duplicate stop.", verbose=True)
+            return False
+
         if self.stop_event:
             self.stop_event.set()
 
@@ -596,6 +646,11 @@ class EvdevBackend(InputBackend):
             except Exception:
                 pass  # Ignore errors when closing devices
         self.devices = []
+        self.thread = None
+        self.stop_event = None
+        self.is_running = False
+        ConfigManager.console_print("Evdev backend stopped.", verbose=True)
+        return True
 
     def _start_listening(self):
         """Start the listening thread."""
@@ -941,9 +996,20 @@ class PynputBackend(InputBackend):
         self.keyboard = None
         self.mouse = None
         self.key_map = None
+        self.is_running = False
+        self.start_count = 0
+        self.stop_count = 0
+        self.session_id = 0
 
     def start(self):
         """Start listening for keyboard and mouse events."""
+        if self.is_running:
+            ConfigManager.console_print(
+                "Pynput backend already running; ignoring duplicate start request.",
+                verbose=True
+            )
+            return False
+
         if self.keyboard is None or self.mouse is None:
             from pynput import keyboard, mouse
             self.keyboard = keyboard
@@ -960,15 +1026,40 @@ class PynputBackend(InputBackend):
         )
         self.keyboard_listener.start()
         self.mouse_listener.start()
+        self.is_running = True
+        self.start_count += 1
+        self.session_id += 1
+        ConfigManager.console_print(
+            (
+                f"Pynput backend started (session={self.session_id}, starts={self.start_count}, "
+                f"keyboard_listener_id={id(self.keyboard_listener)}, mouse_listener_id={id(self.mouse_listener)})."
+            ),
+            verbose=True
+        )
+        return True
 
     def stop(self):
         """Stop listening for keyboard and mouse events."""
+        if not self.is_running:
+            ConfigManager.console_print(
+                "Pynput backend already stopped; ignoring duplicate stop request.",
+                verbose=True
+            )
+            return False
+
         if self.keyboard_listener:
             self.keyboard_listener.stop()
             self.keyboard_listener = None
         if self.mouse_listener:
             self.mouse_listener.stop()
             self.mouse_listener = None
+        self.is_running = False
+        self.stop_count += 1
+        ConfigManager.console_print(
+            f"Pynput backend stopped (session={self.session_id}, starts={self.start_count}, stops={self.stop_count}).",
+            verbose=True
+        )
+        return True
 
     def _translate_key_event(self, native_event) -> Optional[tuple[KeyCode, InputEvent]]:
         """Translate a pynput event to our internal event representation."""

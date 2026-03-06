@@ -26,7 +26,7 @@ def test_azure_openai_end_to_end_llm_flow():
             ('llm_post_processing', 'system_prompt'): 'You are a helpful assistant.'
         }.get((section, key))
         
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = "test-azure-llm-key"
         
         # Mock successful Azure OpenAI API response
@@ -76,8 +76,9 @@ def test_azure_openai_end_to_end_llm_flow():
         assert request_data['messages'][0]['role'] == 'system'
         assert request_data['messages'][0]['content'] == system_message
         assert request_data['messages'][1]['role'] == 'user'
-        assert request_data['messages'][1]['content'] == input_text
-        assert request_data['temperature'] == 0.3
+        assert '<transcript>' in request_data['messages'][1]['content']
+        assert input_text in request_data['messages'][1]['content']
+        assert request_data['temperature'] == 0.0
 
 def test_azure_openai_transcription_and_llm_integration():
     """Test integration between Azure OpenAI transcription and LLM processing."""
@@ -163,7 +164,7 @@ def test_azure_openai_error_handling_chain():
             }
             
             mock_config.get_config_value.side_effect = lambda section, key: scenario['config_values'].get(key)
-            mock_config.console_print = lambda x: None
+            mock_config.console_print = lambda *args, **kwargs: None
             mock_keyring.get_api_key.return_value = scenario['keyring_return']
             
             from llm_processor import LLMProcessor

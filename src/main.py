@@ -213,12 +213,23 @@ class WhisperWriterApp(QObject):
         if self.result_thread and self.result_thread.isRunning():
             self.result_thread.stop()
 
+    def _pause_key_listener_for_processing(self):
+        """Pause the key listener during typing/cleanup work and report whether it was running."""
+        if not getattr(self, 'key_listener', None):
+            return False
+        return bool(self.key_listener.stop())
+
+    def _resume_key_listener_after_processing(self, should_resume):
+        """Resume the key listener only if this processing step paused it."""
+        if should_resume and getattr(self, 'key_listener', None):
+            self.key_listener.start()
+
     def on_transcription_complete(self, result):
         """Process transcription with or without LLM based on activation type."""
+        listener_was_running = False
         try:
             # Temporarily disable key listener
-            if self.key_listener:
-                self.key_listener.stop()
+            listener_was_running = self._pause_key_listener_for_processing()
 
             recording_mode = ConfigManager.get_config_value('recording_options', 'recording_mode')
             if self.use_llm and self.llm_processor and recording_mode in ('press_to_toggle', 'hold_to_record', 'continuous', 'voice_activity_detection'):
@@ -263,29 +274,40 @@ class WhisperWriterApp(QObject):
                     
                     if not system_message:
                         ConfigManager.console_print("Warning: No system message found, using original transcription")
-                        return result
-                    
-                    if mode_name == "cleanup" and not log_cleanup_prompt:
-                        ConfigManager.console_print("Final cleanup system message prepared for LLM", verbose=True)
                     else:
-                        ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}", verbose=True)
-                    original_result = result
-                    processed_result = self.llm_processor.process_text(result, system_message)
-                    if processed_result is not None:
-                        ConfigManager.console_print(f"Cleanup raw output: {processed_result}", verbose=True)
-                    if processed_result:
-                        result = processed_result.strip()
-                        if result == original_result:
-                            ConfigManager.console_print("Cleanup output matches original transcription", verbose=True)
+                        if mode_name == "cleanup" and not log_cleanup_prompt:
+                            ConfigManager.console_print("Final cleanup system message prepared for LLM", verbose=True)
                         else:
-                            ConfigManager.console_print("Cleanup output differs from original transcription", verbose=True)
-                    else:
-                        ConfigManager.console_print("LLM processing failed or returned empty output, using original transcription")
-                        result = original_result
+                            ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}", verbose=True)
+                        original_result = result
+                        processed_result = self.llm_processor.process_text(result, system_message, mode=mode_name)
+                        if processed_result is not None:
+                            ConfigManager.console_print(f"Cleanup raw output: {processed_result}", verbose=True)
+                        if processed_result:
+                            candidate_result = processed_result.strip()
+                            if mode_name == "cleanup":
+                                rejection_reason = LLMProcessor.get_cleanup_rejection_reason(original_result, candidate_result)
+                                if rejection_reason:
+                                    ConfigManager.console_print(
+                                        f"Cleanup output rejected; falling back to original transcription ({rejection_reason})."
+                                    )
+                                    result = original_result
+                                else:
+                                    result = candidate_result
+                            else:
+                                result = candidate_result
+
+                            if result == original_result:
+                                ConfigManager.console_print("Cleanup output matches original transcription", verbose=True)
+                            else:
+                                ConfigManager.console_print("Cleanup output differs from original transcription", verbose=True)
+                        else:
+                            ConfigManager.console_print("LLM processing failed or returned empty output, using original transcription")
+                            result = original_result
                     
                 except Exception as e:
                     ConfigManager.console_print(f"Error processing text through LLM: {str(e)}")
-                    return result
+                    ConfigManager.console_print("Falling back to original transcription after LLM processing error.")
 
             # Type the result
             typed_result = False
@@ -303,18 +325,17 @@ class WhisperWriterApp(QObject):
 
             if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
                 self.start_result_thread()
-            else:
-                self.key_listener.start()
 
         finally:
             # Re-enable key listener
-            if self.key_listener:
-                self.key_listener.start()
+            self._resume_key_listener_after_processing(listener_was_running)
 
     def handle_text_cleanup(self):
         """Handle the text selection cleanup shortcut."""
         if not self.llm_processor:
             return
+
+        listener_was_running = self._pause_key_listener_for_processing()
         
         # Store all clipboard formats
         saved_formats = {}
@@ -379,8 +400,17 @@ class WhisperWriterApp(QObject):
                 ConfigManager.console_print("Final cleanup system message prepared", verbose=True)
             
             # Run through LLM cleanup
-            cleaned_text = self.llm_processor.process_text(clipboard_text, system_message)
+            cleaned_text = self.llm_processor.process_text(clipboard_text, system_message, mode="cleanup")
             ConfigManager.console_print(f"Cleanup output (clipboard): {cleaned_text}", verbose=True)
+
+            if cleaned_text:
+                cleaned_text = cleaned_text.strip()
+                rejection_reason = LLMProcessor.get_cleanup_rejection_reason(clipboard_text, cleaned_text)
+                if rejection_reason:
+                    ConfigManager.console_print(
+                        f"Clipboard cleanup output rejected; leaving original text untouched ({rejection_reason})."
+                    )
+                    cleaned_text = clipboard_text
             
             if cleaned_text and cleaned_text != clipboard_text:
                 paste_succeeded = False
@@ -445,7 +475,7 @@ class WhisperWriterApp(QObject):
             except:
                 pass  # Ensure clipboard is closed even if an error occurred
             # Ensure key listener is restarted
-            self.key_listener.start()
+            self._resume_key_listener_after_processing(listener_was_running)
 
     def run(self):
         """

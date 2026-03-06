@@ -97,7 +97,7 @@ def test_azure_openai_llm_api_call_structure():
             return config_map.get((section, key))
         
         mock_config.get_config_value.side_effect = mock_get_config_value
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         
         # Mock keyring
         mock_keyring.get_api_key.return_value = "test-azure-llm-key"
@@ -143,6 +143,9 @@ def test_azure_openai_llm_api_call_structure():
         assert len(request_data['messages']) == 2
         assert request_data['messages'][0]['role'] == 'system'
         assert request_data['messages'][1]['role'] == 'user'
+        assert '<transcript>' in request_data['messages'][1]['content']
+        assert 'test text' in request_data['messages'][1]['content']
+        assert request_data['temperature'] == 0.0
         
         # Verify result
         assert result == 'Processed text'
@@ -163,7 +166,7 @@ def test_azure_openai_llm_missing_config_handling():
         
         # Mock missing configuration
         mock_config.get_config_value.return_value = None
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = "test-key"
         
         from llm_processor import LLMProcessor
@@ -188,7 +191,7 @@ def test_keyring_azure_openai_llm_key_handling():
         with patch('keyring_manager.keyring') as mock_keyring, \
              patch('keyring_manager.ConfigManager') as mock_config:
             
-            mock_config.console_print = lambda x: None
+            mock_config.console_print = lambda *args, **kwargs: None
             
             from keyring_manager import KeyringManager
             

@@ -146,3 +146,4 @@ config.yaml
 
 # Prompts
 *.txt
+!clenup prompt.txt

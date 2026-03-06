@@ -13,7 +13,7 @@ def test_azure_openai_provider_configuration():
     
     class MockConfigManager:
         @staticmethod
-        def console_print(msg):
+        def console_print(msg, verbose=False):
             print(f"[TEST LOG] {msg}")
             
         @staticmethod 
@@ -42,6 +42,8 @@ def test_azure_openai_provider_configuration():
     
     # Import after mocking
     sys.path.insert(0, 'src')
+    if 'transcription' in sys.modules:
+        del sys.modules['transcription']
     from transcription import transcribe_api
     
     # Mock requests.post to simulate API response
@@ -82,7 +84,7 @@ def test_azure_openai_missing_credentials():
     
     class MockConfigManager:
         @staticmethod
-        def console_print(msg):
+        def console_print(msg, verbose=False):
             print(f"[TEST LOG] {msg}")
             
         @staticmethod 
@@ -106,6 +108,8 @@ def test_azure_openai_missing_credentials():
     
     # Import after mocking
     sys.path.insert(0, 'src')
+    if 'transcription' in sys.modules:
+        del sys.modules['transcription']
     from transcription import transcribe_api
     
     # Test with dummy audio data

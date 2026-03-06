@@ -53,7 +53,7 @@ def test_azure_openai_llm_processor_initialization():
             return None
         
         mock_config.get_config_value.side_effect = mock_get_config_value
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = "test-azure-llm-key"
         
         from llm_processor import LLMProcessor
@@ -94,7 +94,7 @@ def test_azure_openai_llm_text_processing():
             return None
         
         mock_config.get_config_value.side_effect = mock_get_config_value
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = "test-azure-llm-key"
         
         # Mock successful API response
@@ -139,7 +139,9 @@ def test_azure_openai_llm_text_processing():
         assert len(request_data['messages']) == 2
         assert request_data['messages'][0]['role'] == 'system'
         assert request_data['messages'][1]['role'] == 'user'
-        assert request_data['messages'][1]['content'] == 'test text to clean'
+        assert '<transcript>' in request_data['messages'][1]['content']
+        assert 'test text to clean' in request_data['messages'][1]['content']
+        assert request_data['temperature'] == 0.0
 
 def test_azure_openai_llm_missing_credentials():
     """Test Azure OpenAI LLM processor handles missing credentials gracefully."""
@@ -156,7 +158,7 @@ def test_azure_openai_llm_missing_credentials():
         }
         
         mock_config.get_config_value.return_value = None  # No configuration values
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = ""  # No API key
         
         from llm_processor import LLMProcessor
@@ -195,7 +197,7 @@ def test_azure_openai_llm_missing_endpoint():
             return None
         
         mock_config.get_config_value.side_effect = mock_get_config_value
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = "test-key"
         
         from llm_processor import LLMProcessor
@@ -236,7 +238,7 @@ def test_azure_openai_llm_api_error():
             return None
         
         mock_config.get_config_value.side_effect = mock_get_config_value
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = "test-key"
         
         # Mock requests.post to return error
