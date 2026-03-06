@@ -32,6 +32,44 @@ HAS_TORCH = importlib.util.find_spec("torch") is not None
 # Add check for Vosk availability
 HAS_VOSK = importlib.util.find_spec("vosk") is not None
 
+def get_recording_sample_rate() -> int:
+    """Return the configured recording sample rate, falling back to 16 kHz."""
+    return ConfigManager.get_config_section('recording_options').get('sample_rate', 16000)
+
+def get_transcription_hints() -> dict:
+    """Return optional transcription hints configured for the current model."""
+    common_options = ConfigManager.get_config_section('model_options').get('common', {})
+    return {
+        'language': common_options.get('language'),
+        'prompt': common_options.get('initial_prompt'),
+        'temperature': common_options.get('temperature')
+    }
+
+def apply_transcription_hints(request_data: dict) -> dict:
+    """Populate supported transcription hint parameters into an API request payload."""
+    hints = get_transcription_hints()
+    language = hints.get('language')
+    prompt = hints.get('prompt')
+    temperature = hints.get('temperature')
+
+    if language:
+        request_data['language'] = language
+    if prompt:
+        request_data['prompt'] = prompt
+    if temperature is not None:
+        request_data['temperature'] = temperature
+
+    ConfigManager.console_print(
+        (
+            "Transcription hints: "
+            f"language={language or 'auto'}, "
+            f"prompt={'set' if prompt else 'not set'}, "
+            f"temperature={temperature if temperature is not None else 'default'}"
+        ),
+        verbose=True
+    )
+    return request_data
+
 def is_vosk_model(model_name: str) -> bool:
     """Check if the model name is a Vosk model"""
     return model_name in VOSK_MODEL_URLS
@@ -312,21 +350,23 @@ def transcribe_with_openai(audio_data, api_options):
         
         # Convert audio to WAV file
         byte_io = io.BytesIO()
-        sf.write(byte_io, audio_data, 16000, format='wav')
+        sample_rate = get_recording_sample_rate()
+        sf.write(byte_io, audio_data, sample_rate, format='wav')
         byte_io.seek(0)
         
         model = api_options['model']
 
         files = {
             'file': ('audio.wav', byte_io, 'audio/wav'),
-            'model': (None, model),
         }
+        data = apply_transcription_hints({'model': model})
         
         ConfigManager.console_print(f"Sending request to OpenAI API using {model}...")
         response = requests.post(
             f"{base_url}/audio/transcriptions",
             headers=headers,
-            files=files
+            files=files,
+            data=data
         )
         
         if response.status_code == 200:
@@ -375,7 +415,8 @@ def transcribe_with_azure_openai(audio_data, api_options):
         
         # Convert audio to WAV file
         byte_io = io.BytesIO()
-        sf.write(byte_io, audio_data, 16000, format='wav')
+        sample_rate = get_recording_sample_rate()
+        sf.write(byte_io, audio_data, sample_rate, format='wav')
         byte_io.seek(0)
         
         model = api_options['model']
@@ -383,10 +424,9 @@ def transcribe_with_azure_openai(audio_data, api_options):
         files = {
             'file': ('audio.wav', byte_io, 'audio/wav'),
         }
-        
-        data = {
+        data = apply_transcription_hints({
             'model': model,
-        }
+        })
         
         params = {
             'api-version': api_version
@@ -426,7 +466,8 @@ def transcribe_with_deepgram(audio_data, api_options):
             
         # Convert audio to WAV format
         byte_io = io.BytesIO()
-        sf.write(byte_io, audio_data, 16000, format='wav')
+        sample_rate = get_recording_sample_rate()
+        sf.write(byte_io, audio_data, sample_rate, format='wav')
         audio_data = byte_io.getvalue()
         
         headers = {
@@ -480,7 +521,8 @@ def transcribe_with_groq(audio_data, api_options):
             
         # Convert audio to WAV format
         byte_io = io.BytesIO()
-        sf.write(byte_io, audio_data, 16000, format='wav')
+        sample_rate = get_recording_sample_rate()
+        sf.write(byte_io, audio_data, sample_rate, format='wav')
         byte_io.seek(0)
         
         if Groq is None:

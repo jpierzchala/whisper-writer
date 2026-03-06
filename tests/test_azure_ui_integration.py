@@ -71,7 +71,7 @@ def test_azure_openai_llm_keyring_save_integration():
         with patch('keyring_manager.keyring') as mock_keyring, \
              patch('keyring_manager.ConfigManager') as mock_config:
             
-            mock_config.console_print = lambda x: None
+            mock_config.console_print = lambda *args, **kwargs: None
             
             from keyring_manager import KeyringManager
             
@@ -100,7 +100,7 @@ def test_azure_openai_llm_keyring_retrieve_integration():
         with patch('keyring_manager.keyring') as mock_keyring, \
              patch('keyring_manager.ConfigManager') as mock_config:
             
-            mock_config.console_print = lambda x: None
+            mock_config.console_print = lambda *args, **kwargs: None
             
             from keyring_manager import KeyringManager
             
@@ -322,7 +322,7 @@ def test_llm_processor_azure_integration():
             ('llm_post_processing', 'azure_openai_llm_api_version'): '2024-02-01'
         }.get((section, key))
         
-        mock_config.console_print = lambda x: None
+        mock_config.console_print = lambda *args, **kwargs: None
         mock_keyring.get_api_key.return_value = "test-azure-llm-key"
         
         from llm_processor import LLMProcessor
