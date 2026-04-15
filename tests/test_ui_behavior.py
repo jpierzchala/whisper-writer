@@ -84,7 +84,11 @@ def test_transcription_language_combobox_offers_auto_and_known_languages(setting
     assert language_combo.findData('auto') != -1
     assert language_combo.findData('en') != -1
     assert language_combo.findData('pl') != -1
+
+    settings_window.set_widget_value(language_combo, 'auto', 'str')
+
     assert settings_window._get_combobox_value(language_combo) == 'auto'
+    assert language_combo.currentText() == 'Auto'
 
 
 def test_transcription_language_combobox_maps_existing_language_codes(settings_window):
