@@ -1,6 +1,7 @@
 import subprocess
 import os
 import signal
+import threading
 import time
 import win32clipboard
 import win32con
@@ -44,8 +45,20 @@ IMAGE_CLIPBOARD_FORMATS = {
     win32con.CF_METAFILEPICT,
 }
 
+IMAGE_CLIPBOARD_FORMAT_HINTS = (
+    'bitmap',
+    'dib',
+    'image',
+    'png',
+    'jpg',
+    'jpeg',
+    'gif',
+    'tiff',
+)
+
 TEXT_ONLY_CLIPBOARD_RESTORE_DELAY = 0.2
 RICH_CONTENT_CLIPBOARD_RESTORE_DELAY = 0.5
+IMAGE_CLIPBOARD_ASYNC_RESTORE_DELAY = 2.0
 
 def run_command_or_exit_on_failure(command):
     """
@@ -64,6 +77,9 @@ class InputSimulator:
     """
     A class to simulate keyboard input using various methods.
     """
+
+    _clipboard_restore_generation = 0
+    _clipboard_restore_lock = threading.Lock()
 
     def __init__(self):
         """
@@ -104,10 +120,13 @@ class InputSimulator:
         
         # Use clipboard for long text
         if len(text) > char_threshold:
-            self._paste_with_clipboard_preservation(text)
-            return
+            if self._paste_with_clipboard_preservation(text):
+                return
 
-        # Use regular keystroke simulation for shorter text
+        self.typewrite_direct(text)
+
+    def typewrite_direct(self, text):
+        """Type text without using the clipboard."""
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
         if self.input_method == 'pynput':
             self._typewrite_pynput(text, interval)
@@ -163,11 +182,92 @@ class InputSimulator:
         return any(format_id not in TEXT_CLIPBOARD_FORMATS for format_id in format_ids)
 
     @classmethod
+    def has_image_clipboard_content(cls, formats):
+        """Return True if clipboard contains image-like formats that can override text paste."""
+        format_ids = formats.keys() if isinstance(formats, dict) else formats
+        for format_id in format_ids:
+            if format_id in IMAGE_CLIPBOARD_FORMATS:
+                return True
+            format_name = cls.get_clipboard_format_name(format_id).lower()
+            if any(hint in format_name for hint in IMAGE_CLIPBOARD_FORMAT_HINTS):
+                return True
+        return False
+
+    @classmethod
+    def reserve_clipboard_restore_generation(cls):
+        """Reserve a generation id for the next clipboard restore task."""
+        with cls._clipboard_restore_lock:
+            cls._clipboard_restore_generation += 1
+            return cls._clipboard_restore_generation
+
+    @classmethod
+    def is_current_clipboard_restore_generation(cls, generation):
+        """Return True when the restore task is still the latest scheduled one."""
+        with cls._clipboard_restore_lock:
+            return generation == cls._clipboard_restore_generation
+
+    @classmethod
+    def restore_clipboard_if_unchanged(cls, saved_formats, pasted_text, success_message, skip_message):
+        """Restore clipboard formats only if the clipboard still contains the pasted text."""
+        if not cls.safe_open_clipboard():
+            ConfigManager.console_print("Unable to reopen clipboard for restoring original content.")
+            return False
+
+        try:
+            current_text = cls.get_open_clipboard_text()
+            if not cls.should_restore_clipboard(current_text, pasted_text):
+                ConfigManager.console_print(skip_message, verbose=True)
+                return False
+
+            win32clipboard.EmptyClipboard()
+            restored_formats = cls.restore_open_clipboard_formats(saved_formats)
+            ConfigManager.console_print(
+                f"{success_message}: {cls.describe_clipboard_formats(restored_formats)}",
+                verbose=True,
+            )
+            return True
+        finally:
+            cls.safe_close_clipboard()
+
+    @classmethod
+    def schedule_clipboard_restore(cls, saved_formats, pasted_text, delay, context_label):
+        """Restore clipboard formats asynchronously after a delay if clipboard is unchanged."""
+        generation = cls.reserve_clipboard_restore_generation()
+        ConfigManager.console_print(
+            f"Scheduled clipboard restore in {delay:.2f}s after {context_label}.",
+            verbose=True,
+        )
+
+        def restore_later():
+            if not cls.is_current_clipboard_restore_generation(generation):
+                ConfigManager.console_print(
+                    f"Skipping delayed clipboard restore for {context_label} because a newer clipboard operation was scheduled.",
+                    verbose=True,
+                )
+                return
+
+            cls.restore_clipboard_if_unchanged(
+                saved_formats,
+                pasted_text,
+                success_message=f"Restored clipboard formats after delayed {context_label}",
+                skip_message=f"Skipping delayed clipboard restore after {context_label} because clipboard contents changed before restore.",
+            )
+
+        timer = threading.Timer(delay, restore_later)
+        timer.daemon = True
+        timer.start()
+
+    @classmethod
     def get_clipboard_restore_delay(cls, formats):
         """Use a longer restore delay when the original clipboard had rich content."""
         if cls.has_rich_clipboard_content(formats):
             return RICH_CONTENT_CLIPBOARD_RESTORE_DELAY
         return TEXT_ONLY_CLIPBOARD_RESTORE_DELAY
+
+    @staticmethod
+    def get_image_clipboard_restore_delay():
+        """Return the async restore delay used for clipboard image content."""
+        return IMAGE_CLIPBOARD_ASYNC_RESTORE_DELAY
 
     @classmethod
     def capture_open_clipboard_formats(cls):
@@ -224,8 +324,10 @@ class InputSimulator:
         # Store all clipboard formats
         saved_formats = {}
         if not InputSimulator.safe_open_clipboard():
-            ConfigManager.console_print("Unable to open clipboard for preserving original content.")
-            return
+            ConfigManager.console_print(
+                "Unable to open clipboard for preserving original content; falling back to direct typing."
+            )
+            return False
         
         try:
             saved_formats = InputSimulator.capture_open_clipboard_formats()
@@ -233,7 +335,13 @@ class InputSimulator:
                 f"Clipboard paste captured formats: {InputSimulator.describe_clipboard_formats(saved_formats)}",
                 verbose=True,
             )
-            if InputSimulator.has_rich_clipboard_content(saved_formats):
+            image_clipboard = InputSimulator.has_image_clipboard_content(saved_formats)
+            if image_clipboard:
+                ConfigManager.console_print(
+                    "Clipboard contains image formats; using delayed clipboard restore so the target app keeps seeing text long enough to paste it instead of the image.",
+                    verbose=True,
+                )
+            elif InputSimulator.has_rich_clipboard_content(saved_formats):
                 ConfigManager.console_print(
                     "Clipboard contains non-text formats; delaying clipboard restore to avoid restoring image/rich content before paste completes.",
                     verbose=True,
@@ -242,6 +350,11 @@ class InputSimulator:
             # Clear clipboard and set our text
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+        except Exception as exc:
+            ConfigManager.console_print(
+                f"Unable to prepare clipboard text for paste; falling back to direct typing ({exc})."
+            )
+            return False
         finally:
             InputSimulator.safe_close_clipboard()
 
@@ -258,6 +371,15 @@ class InputSimulator:
             assert self.dotool_process and self.dotool_process.stdin
             self.dotool_process.stdin.write("key ctrl+v\n")
             self.dotool_process.stdin.flush()
+
+        if image_clipboard:
+            InputSimulator.schedule_clipboard_restore(
+                saved_formats,
+                text,
+                InputSimulator.get_image_clipboard_restore_delay(),
+                context_label='paste',
+            )
+            return True
             
         # Wait for the target application to read clipboard data before restoring the original clipboard.
         restore_delay = InputSimulator.get_clipboard_restore_delay(saved_formats)
@@ -270,24 +392,17 @@ class InputSimulator:
         # Restore all original clipboard formats
         if not InputSimulator.safe_open_clipboard():
             ConfigManager.console_print("Unable to reopen clipboard for restoring original content.")
-            return
-        try:
-            current_text = InputSimulator.get_open_clipboard_text()
-            if not InputSimulator.should_restore_clipboard(current_text, text):
-                ConfigManager.console_print(
-                    "Skipping clipboard restore because clipboard contents changed before restore.",
-                    verbose=True,
-                )
-                return
+            return True
+        InputSimulator.safe_close_clipboard()
 
-            win32clipboard.EmptyClipboard()
-            restored_formats = InputSimulator.restore_open_clipboard_formats(saved_formats)
-            ConfigManager.console_print(
-                f"Restored clipboard formats: {InputSimulator.describe_clipboard_formats(restored_formats)}",
-                verbose=True,
-            )
-        finally:
-            InputSimulator.safe_close_clipboard()
+        InputSimulator.restore_clipboard_if_unchanged(
+            saved_formats,
+            text,
+            success_message='Restored clipboard formats',
+            skip_message='Skipping clipboard restore because clipboard contents changed before restore.',
+        )
+
+        return True
 
     def _typewrite_pynput(self, text, interval):
         """
