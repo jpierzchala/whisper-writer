@@ -422,23 +422,32 @@ class WhisperWriterApp(QObject):
                 try:
                     # Simulate keyboard events with proper cleanup
                     keyboard = Controller()
+                    use_direct_typing = InputSimulator.has_image_clipboard_content(saved_formats)
+                    if use_direct_typing:
+                        ConfigManager.console_print(
+                            "Clipboard cleanup detected image formats; using direct typing instead of clipboard paste to avoid pasting the image back into the target app."
+                        )
                     
-                    # First set the cleaned text to clipboard
-                    if not InputSimulator.safe_open_clipboard():
-                        raise RuntimeError("Unable to open clipboard for cleanup paste")
-                    win32clipboard.EmptyClipboard()
-                    win32clipboard.SetClipboardText(cleaned_text, win32con.CF_UNICODETEXT)
-                    InputSimulator.safe_close_clipboard()
+                    if not use_direct_typing:
+                        # First set the cleaned text to clipboard
+                        if not InputSimulator.safe_open_clipboard():
+                            raise RuntimeError("Unable to open clipboard for cleanup paste")
+                        win32clipboard.EmptyClipboard()
+                        win32clipboard.SetClipboardText(cleaned_text, win32con.CF_UNICODETEXT)
+                        InputSimulator.safe_close_clipboard()
                     
                     try:
                         # Delete selected text and paste cleaned text
                         keyboard.press(Key.delete)
                         keyboard.release(Key.delete)
                         time.sleep(0.1)  # Small delay after delete
-                        
-                        with keyboard.pressed(Key.ctrl):
-                            keyboard.press('v')
-                            keyboard.release('v')
+
+                        if use_direct_typing:
+                            self.input_simulator.typewrite_direct(cleaned_text)
+                        else:
+                            with keyboard.pressed(Key.ctrl):
+                                keyboard.press('v')
+                                keyboard.release('v')
 
                         paste_succeeded = True
                         
@@ -452,32 +461,38 @@ class WhisperWriterApp(QObject):
                         keyboard.release(Key.delete)
                         
                         # Restore original clipboard content
-                        restore_delay = InputSimulator.get_clipboard_restore_delay(saved_formats)
-                        ConfigManager.console_print(
-                            f"Waiting {restore_delay:.2f}s before restoring clipboard after cleanup paste.",
-                            verbose=True,
-                        )
-                        time.sleep(restore_delay)
-
-                        if InputSimulator.safe_open_clipboard():
-                            try:
-                                current_text = InputSimulator.get_open_clipboard_text()
-                                if InputSimulator.should_restore_clipboard(current_text, cleaned_text):
-                                    win32clipboard.EmptyClipboard()
-                                    restored_formats = InputSimulator.restore_open_clipboard_formats(saved_formats)
-                                    ConfigManager.console_print(
-                                        f"Restored clipboard formats after cleanup paste: {InputSimulator.describe_clipboard_formats(restored_formats)}",
-                                        verbose=True,
-                                    )
-                                else:
-                                    ConfigManager.console_print(
-                                        "Skipping clipboard restore after cleanup paste because clipboard contents changed before restore.",
-                                        verbose=True,
-                                    )
-                            finally:
-                                InputSimulator.safe_close_clipboard()
+                        if use_direct_typing:
+                            ConfigManager.console_print(
+                                "Skipped clipboard restore after cleanup because direct typing was used.",
+                                verbose=True,
+                            )
                         else:
-                            ConfigManager.console_print("Unable to reopen clipboard for cleanup restore.")
+                            restore_delay = InputSimulator.get_clipboard_restore_delay(saved_formats)
+                            ConfigManager.console_print(
+                                f"Waiting {restore_delay:.2f}s before restoring clipboard after cleanup paste.",
+                                verbose=True,
+                            )
+                            time.sleep(restore_delay)
+
+                            if InputSimulator.safe_open_clipboard():
+                                try:
+                                    current_text = InputSimulator.get_open_clipboard_text()
+                                    if InputSimulator.should_restore_clipboard(current_text, cleaned_text):
+                                        win32clipboard.EmptyClipboard()
+                                        restored_formats = InputSimulator.restore_open_clipboard_formats(saved_formats)
+                                        ConfigManager.console_print(
+                                            f"Restored clipboard formats after cleanup paste: {InputSimulator.describe_clipboard_formats(restored_formats)}",
+                                            verbose=True,
+                                        )
+                                    else:
+                                        ConfigManager.console_print(
+                                            "Skipping clipboard restore after cleanup paste because clipboard contents changed before restore.",
+                                            verbose=True,
+                                        )
+                                finally:
+                                    InputSimulator.safe_close_clipboard()
+                            else:
+                                ConfigManager.console_print("Unable to reopen clipboard for cleanup restore.")
                         
                     # Clear the key chord state
                     self.key_listener.text_cleanup_chord.pressed_keys.clear()
