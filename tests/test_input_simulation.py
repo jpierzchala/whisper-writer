@@ -49,11 +49,24 @@ def test_clipboard_restore_delay_is_longer_for_rich_content(input_simulation_mod
     assert module.InputSimulator.get_clipboard_restore_delay({module.win32con.CF_BITMAP: object()}) == 0.5
 
 
-def test_paste_waits_longer_before_restoring_rich_clipboard(input_simulation_module, monkeypatch):
+def test_has_image_clipboard_content_detects_custom_bitmap_formats(input_simulation_module, monkeypatch):
+    module = input_simulation_module
+
+    monkeypatch.setattr(
+        module.InputSimulator,
+        'get_clipboard_format_name',
+        staticmethod(lambda format_id: 'System.Drawing.Bitmap' if format_id == 50012 else f'FORMAT_{format_id}'),
+    )
+
+    assert module.InputSimulator.has_image_clipboard_content([50012]) is True
+
+
+def test_paste_waits_longer_before_restoring_non_image_rich_clipboard(input_simulation_module, monkeypatch):
     module = input_simulation_module
 
     sleep_calls = []
-    enum_order = [module.win32con.CF_BITMAP, module.win32con.CF_UNICODETEXT]
+    rich_format = 49161
+    enum_order = [rich_format, module.win32con.CF_UNICODETEXT]
 
     def fake_enum_clipboard_formats(previous):
         if previous == 0:
@@ -63,8 +76,8 @@ def test_paste_waits_longer_before_restoring_rich_clipboard(input_simulation_mod
         return 0
 
     def fake_get_clipboard_data(format_id):
-        if format_id == module.win32con.CF_BITMAP:
-            return SimpleNamespace(name='bitmap')
+        if format_id == rich_format:
+            return SimpleNamespace(name='data-object')
         if format_id == module.win32con.CF_UNICODETEXT:
             return 'pasted text'
         raise AssertionError(f'unexpected format {format_id}')
@@ -82,6 +95,43 @@ def test_paste_waits_longer_before_restoring_rich_clipboard(input_simulation_mod
     simulator._paste_with_clipboard_preservation('pasted text')
 
     assert sleep_calls == [0.5]
+
+
+def test_typewrite_falls_back_to_direct_typing_for_image_clipboard(input_simulation_module, monkeypatch):
+    module = input_simulation_module
+
+    typed_texts = []
+    set_clipboard_calls = []
+
+    def fake_get_config_value(category, key):
+        values = {
+            ('post_processing', 'input_method'): 'pynput',
+            ('post_processing', 'clipboard_threshold'): 10,
+            ('post_processing', 'writing_key_press_delay'): 0,
+        }
+        return values.get((category, key))
+
+    monkeypatch.setattr(module.ConfigManager, 'get_config_value', fake_get_config_value)
+    monkeypatch.setattr(module.InputSimulator, 'safe_open_clipboard', staticmethod(lambda: True))
+    monkeypatch.setattr(module.InputSimulator, 'safe_close_clipboard', staticmethod(lambda: True))
+    monkeypatch.setattr(
+        module.InputSimulator,
+        'capture_open_clipboard_formats',
+        classmethod(lambda cls: {module.win32con.CF_BITMAP: object(), module.win32con.CF_DIB: object()}),
+    )
+    monkeypatch.setattr(module.win32clipboard, 'EmptyClipboard', lambda: None)
+    monkeypatch.setattr(
+        module.win32clipboard,
+        'SetClipboardText',
+        lambda text, fmt: set_clipboard_calls.append((text, fmt)),
+    )
+    monkeypatch.setattr(module.InputSimulator, 'typewrite_direct', lambda self, text: typed_texts.append(text))
+
+    simulator = module.InputSimulator()
+    simulator.typewrite('This text is definitely longer than ten characters.')
+
+    assert typed_texts == ['This text is definitely longer than ten characters.']
+    assert set_clipboard_calls == []
 
 
 def test_paste_skips_restoring_when_clipboard_changes(input_simulation_module, monkeypatch):
