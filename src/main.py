@@ -422,19 +422,19 @@ class WhisperWriterApp(QObject):
                 try:
                     # Simulate keyboard events with proper cleanup
                     keyboard = Controller()
-                    use_direct_typing = InputSimulator.has_image_clipboard_content(saved_formats)
-                    if use_direct_typing:
+                    image_clipboard = InputSimulator.has_image_clipboard_content(saved_formats)
+                    if image_clipboard:
                         ConfigManager.console_print(
-                            "Clipboard cleanup detected image formats; using direct typing instead of clipboard paste to avoid pasting the image back into the target app."
+                            "Clipboard cleanup detected image formats; using delayed clipboard restore so the target app keeps seeing text long enough to paste it instead of the image.",
+                            verbose=True,
                         )
                     
-                    if not use_direct_typing:
-                        # First set the cleaned text to clipboard
-                        if not InputSimulator.safe_open_clipboard():
-                            raise RuntimeError("Unable to open clipboard for cleanup paste")
-                        win32clipboard.EmptyClipboard()
-                        win32clipboard.SetClipboardText(cleaned_text, win32con.CF_UNICODETEXT)
-                        InputSimulator.safe_close_clipboard()
+                    # First set the cleaned text to clipboard
+                    if not InputSimulator.safe_open_clipboard():
+                        raise RuntimeError("Unable to open clipboard for cleanup paste")
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.SetClipboardText(cleaned_text, win32con.CF_UNICODETEXT)
+                    InputSimulator.safe_close_clipboard()
                     
                     try:
                         # Delete selected text and paste cleaned text
@@ -442,12 +442,9 @@ class WhisperWriterApp(QObject):
                         keyboard.release(Key.delete)
                         time.sleep(0.1)  # Small delay after delete
 
-                        if use_direct_typing:
-                            self.input_simulator.typewrite_direct(cleaned_text)
-                        else:
-                            with keyboard.pressed(Key.ctrl):
-                                keyboard.press('v')
-                                keyboard.release('v')
+                        with keyboard.pressed(Key.ctrl):
+                            keyboard.press('v')
+                            keyboard.release('v')
 
                         paste_succeeded = True
                         
@@ -461,10 +458,16 @@ class WhisperWriterApp(QObject):
                         keyboard.release(Key.delete)
                         
                         # Restore original clipboard content
-                        if use_direct_typing:
+                        if image_clipboard:
                             ConfigManager.console_print(
-                                "Skipped clipboard restore after cleanup because direct typing was used.",
+                                f"Delaying clipboard restore by {InputSimulator.get_clipboard_restore_delay(saved_formats):.2f}s would still be too short for image clipboard content; scheduling delayed restore instead.",
                                 verbose=True,
+                            )
+                            InputSimulator.schedule_clipboard_restore(
+                                saved_formats,
+                                cleaned_text,
+                                delay=InputSimulator.get_image_clipboard_restore_delay(),
+                                context_label='cleanup paste',
                             )
                         else:
                             restore_delay = InputSimulator.get_clipboard_restore_delay(saved_formats)
@@ -473,26 +476,12 @@ class WhisperWriterApp(QObject):
                                 verbose=True,
                             )
                             time.sleep(restore_delay)
-
-                            if InputSimulator.safe_open_clipboard():
-                                try:
-                                    current_text = InputSimulator.get_open_clipboard_text()
-                                    if InputSimulator.should_restore_clipboard(current_text, cleaned_text):
-                                        win32clipboard.EmptyClipboard()
-                                        restored_formats = InputSimulator.restore_open_clipboard_formats(saved_formats)
-                                        ConfigManager.console_print(
-                                            f"Restored clipboard formats after cleanup paste: {InputSimulator.describe_clipboard_formats(restored_formats)}",
-                                            verbose=True,
-                                        )
-                                    else:
-                                        ConfigManager.console_print(
-                                            "Skipping clipboard restore after cleanup paste because clipboard contents changed before restore.",
-                                            verbose=True,
-                                        )
-                                finally:
-                                    InputSimulator.safe_close_clipboard()
-                            else:
-                                ConfigManager.console_print("Unable to reopen clipboard for cleanup restore.")
+                            InputSimulator.restore_clipboard_if_unchanged(
+                                saved_formats,
+                                cleaned_text,
+                                success_message='Restored clipboard formats after cleanup paste',
+                                skip_message='Skipping clipboard restore after cleanup paste because clipboard contents changed before restore.',
+                            )
                         
                     # Clear the key chord state
                     self.key_listener.text_cleanup_chord.pressed_keys.clear()
