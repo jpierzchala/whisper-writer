@@ -16,6 +16,7 @@ from utils import ConfigManager
 from keyring_manager import KeyringManager
 from llm_processor import LLMProcessor
 from ui.model_refresh_worker import ModelRefreshWorker
+from whisper_languages import WHISPER_LANGUAGE_CHOICES, normalize_whisper_language
 
 TEXT_INPUT_WIDGET_TYPES = tuple(
     widget_type for widget_type in (QLineEdit, QComboBox, QTextEdit, QSpinBox)
@@ -335,6 +336,9 @@ class SettingsWindow(BaseWindow):
                 widget.setPlaceholderText("Enter model name (e.g. gpt-4o-mini for OpenAI, llama3.2 for Ollama)")
                 return widget
 
+        if category == 'model_options' and sub_category == 'common' and key == 'language':
+            return self.create_combobox(current_value, WHISPER_LANGUAGE_CHOICES)
+
         if meta_type == 'bool':
             return self.create_checkbox(current_value, key)
         elif meta_type == 'str' and 'options' in meta:
@@ -415,9 +419,31 @@ class SettingsWindow(BaseWindow):
 
     def create_combobox(self, value, options):
         widget = QComboBox()
-        widget.addItems(options)
-        widget.setCurrentText(value)
+        for option in options:
+            if isinstance(option, tuple):
+                widget.addItem(option[0], option[1])
+            else:
+                widget.addItem(option)
+        self._set_combobox_value(widget, value)
         return widget
+
+    def _set_combobox_value(self, combo, value):
+        index = combo.findData(value)
+        if index == -1 and value is not None:
+            index = combo.findText(str(value))
+
+        if index == -1:
+            normalized_value = normalize_whisper_language(value)
+            for option_index in range(combo.count()):
+                option_data = combo.itemData(option_index)
+                option_text = combo.itemText(option_index)
+                option_value = option_data if option_data is not None else option_text
+                if normalize_whisper_language(option_value) == normalized_value:
+                    index = option_index
+                    break
+
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def create_line_edit(self, value, key=None, password_mode=False):
         widget = QLineEdit(value)
@@ -637,11 +663,7 @@ class SettingsWindow(BaseWindow):
         if isinstance(widget, QCheckBox):
             widget.setChecked(value)
         elif isinstance(widget, QComboBox):
-            index = widget.findData(value)
-            if index == -1 and value is not None:
-                index = widget.findText(str(value))
-            if index >= 0:
-                widget.setCurrentIndex(index)
+            self._set_combobox_value(widget, value)
         elif isinstance(widget, QLineEdit):
             widget.setText(str(value) if value is not None else '')
         elif isinstance(widget, QTextEdit):  # Add handling for QTextEdit

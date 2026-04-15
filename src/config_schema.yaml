@@ -8,9 +8,9 @@ model_options:
   # Common configuration options for both API and local models
   common:
     language:
-      value: null
+      value: auto
       type: str
-      description: "The language code for the transcription in ISO-639-1 format."
+      description: "The language hint for transcription. Use Auto to let Whisper detect the language, or choose a supported Whisper language from the settings dropdown."
     temperature:
       value: 0.0
       type: float

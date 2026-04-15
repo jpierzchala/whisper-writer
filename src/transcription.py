@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - optional in tests
 from utils import ConfigManager
 from keyring_manager import KeyringManager
 from text_processor import TextProcessor
+from whisper_languages import normalize_whisper_language
 
 VOSK_MODEL_URLS = {
     'vosk-model-small-en-us-0.15': 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip',
@@ -40,7 +41,7 @@ def get_transcription_hints() -> dict:
     """Return optional transcription hints configured for the current model."""
     common_options = ConfigManager.get_config_section('model_options').get('common', {})
     return {
-        'language': common_options.get('language'),
+        'language': normalize_whisper_language(common_options.get('language')),
         'prompt': common_options.get('initial_prompt'),
         'temperature': common_options.get('temperature')
     }
@@ -301,12 +302,13 @@ def transcribe_local(audio_data, local_model=None):
     else:
         # Existing Whisper transcription logic
         audio_data_float = audio_data.astype(np.float32) / 32768.0
+        hints = get_transcription_hints()
         response = model.transcribe(
             audio=audio_data_float,
-            language=model_options['common']['language'],
-            initial_prompt=model_options['common']['initial_prompt'],
+            language=hints['language'],
+            initial_prompt=hints['prompt'],
             condition_on_previous_text=model_options['local']['condition_on_previous_text'],
-            temperature=model_options['common']['temperature'],
+            temperature=hints['temperature'],
             vad_filter=model_options['local']['vad_filter'],
         )
         return ''.join([segment.text for segment in list(response[0])])
