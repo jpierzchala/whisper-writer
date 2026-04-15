@@ -97,27 +97,20 @@ def test_paste_waits_longer_before_restoring_non_image_rich_clipboard(input_simu
     assert sleep_calls == [0.5]
 
 
-def test_typewrite_falls_back_to_direct_typing_for_image_clipboard(input_simulation_module, monkeypatch):
+def test_paste_schedules_delayed_restore_for_image_clipboard(input_simulation_module, monkeypatch):
     module = input_simulation_module
 
-    typed_texts = []
+    schedule_calls = []
     set_clipboard_calls = []
+    sleep_calls = []
+    saved_formats = {module.win32con.CF_BITMAP: object(), module.win32con.CF_DIB: object()}
 
-    def fake_get_config_value(category, key):
-        values = {
-            ('post_processing', 'input_method'): 'pynput',
-            ('post_processing', 'clipboard_threshold'): 10,
-            ('post_processing', 'writing_key_press_delay'): 0,
-        }
-        return values.get((category, key))
-
-    monkeypatch.setattr(module.ConfigManager, 'get_config_value', fake_get_config_value)
     monkeypatch.setattr(module.InputSimulator, 'safe_open_clipboard', staticmethod(lambda: True))
     monkeypatch.setattr(module.InputSimulator, 'safe_close_clipboard', staticmethod(lambda: True))
     monkeypatch.setattr(
         module.InputSimulator,
         'capture_open_clipboard_formats',
-        classmethod(lambda cls: {module.win32con.CF_BITMAP: object(), module.win32con.CF_DIB: object()}),
+        classmethod(lambda cls: saved_formats),
     )
     monkeypatch.setattr(module.win32clipboard, 'EmptyClipboard', lambda: None)
     monkeypatch.setattr(
@@ -125,13 +118,25 @@ def test_typewrite_falls_back_to_direct_typing_for_image_clipboard(input_simulat
         'SetClipboardText',
         lambda text, fmt: set_clipboard_calls.append((text, fmt)),
     )
-    monkeypatch.setattr(module.InputSimulator, 'typewrite_direct', lambda self, text: typed_texts.append(text))
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(
+        module.InputSimulator,
+        'schedule_clipboard_restore',
+        classmethod(lambda cls, saved_formats, pasted_text, delay, context_label: schedule_calls.append((saved_formats, pasted_text, delay, context_label))),
+    )
 
     simulator = module.InputSimulator()
-    simulator.typewrite('This text is definitely longer than ten characters.')
+    result = simulator._paste_with_clipboard_preservation('This text is definitely longer than ten characters.')
 
-    assert typed_texts == ['This text is definitely longer than ten characters.']
-    assert set_clipboard_calls == []
+    assert result is True
+    assert set_clipboard_calls == [('This text is definitely longer than ten characters.', module.win32con.CF_UNICODETEXT)]
+    assert len(schedule_calls) == 1
+    captured_formats, pasted_text, delay, context_label = schedule_calls[0]
+    assert captured_formats is saved_formats
+    assert pasted_text == 'This text is definitely longer than ten characters.'
+    assert delay == module.IMAGE_CLIPBOARD_ASYNC_RESTORE_DELAY
+    assert context_label == 'paste'
+    assert sleep_calls == []
 
 
 def test_paste_skips_restoring_when_clipboard_changes(input_simulation_module, monkeypatch):
