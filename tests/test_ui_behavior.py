@@ -76,3 +76,22 @@ def test_azure_fields_visible(settings_window, qapp):
         widget = settings_window.findChild(QWidget, f'llm_post_processing_{name}_input')
         assert widget is not None and not widget.isHidden(), f"{name} should be visible"
 
+
+def test_transcription_language_combobox_offers_auto_and_known_languages(settings_window):
+    language_combo = settings_window.findChild(QComboBox, 'model_options_common_language_input')
+
+    assert language_combo is not None
+    assert language_combo.findData('auto') != -1
+    assert language_combo.findData('en') != -1
+    assert language_combo.findData('pl') != -1
+    assert settings_window._get_combobox_value(language_combo) == 'auto'
+
+
+def test_transcription_language_combobox_maps_existing_language_codes(settings_window):
+    language_combo = settings_window.findChild(QComboBox, 'model_options_common_language_input')
+
+    settings_window.set_widget_value(language_combo, 'pl', 'str')
+
+    assert settings_window._get_combobox_value(language_combo) == 'pl'
+    assert language_combo.currentText() == 'Polish (pl)'
+
