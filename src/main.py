@@ -339,25 +339,30 @@ class WhisperWriterApp(QObject):
         
         # Store all clipboard formats
         saved_formats = {}
-        win32clipboard.OpenClipboard()
+        if not InputSimulator.safe_open_clipboard():
+            ConfigManager.console_print("Unable to open clipboard for text cleanup.")
+            self._resume_key_listener_after_processing(listener_was_running)
+            return
         
         try:
-            # Get the list of available formats
-            format_id = win32clipboard.EnumClipboardFormats(0)
-            while format_id:
-                try:
-                    data = win32clipboard.GetClipboardData(format_id)
-                    saved_formats[format_id] = data
-                except:
-                    pass  # Skip formats we can't handle
-                format_id = win32clipboard.EnumClipboardFormats(format_id)
+            saved_formats = InputSimulator.capture_open_clipboard_formats()
+            ConfigManager.console_print(
+                f"Clipboard cleanup captured formats: {InputSimulator.describe_clipboard_formats(saved_formats)}",
+                verbose=True,
+            )
             
             # Get the text content
             clipboard_text = saved_formats.get(win32con.CF_UNICODETEXT)
-            win32clipboard.CloseClipboard()
+            InputSimulator.safe_close_clipboard()
 
             if not clipboard_text:
                 ConfigManager.console_print("No text in clipboard")
+                return
+
+            if not isinstance(clipboard_text, str):
+                ConfigManager.console_print(
+                    f"Clipboard cleanup expected text, got {type(clipboard_text).__name__}; skipping cleanup."
+                )
                 return
             
             ConfigManager.console_print(f"Processing clipboard text: {clipboard_text[:100]}...", verbose=True)
@@ -419,10 +424,11 @@ class WhisperWriterApp(QObject):
                     keyboard = Controller()
                     
                     # First set the cleaned text to clipboard
-                    win32clipboard.OpenClipboard()
+                    if not InputSimulator.safe_open_clipboard():
+                        raise RuntimeError("Unable to open clipboard for cleanup paste")
                     win32clipboard.EmptyClipboard()
-                    win32clipboard.SetClipboardText(cleaned_text)
-                    win32clipboard.CloseClipboard()
+                    win32clipboard.SetClipboardText(cleaned_text, win32con.CF_UNICODETEXT)
+                    InputSimulator.safe_close_clipboard()
                     
                     try:
                         # Delete selected text and paste cleaned text
@@ -446,15 +452,32 @@ class WhisperWriterApp(QObject):
                         keyboard.release(Key.delete)
                         
                         # Restore original clipboard content
-                        time.sleep(0.1)  # Wait for paste to complete
-                        win32clipboard.OpenClipboard()
-                        win32clipboard.EmptyClipboard()
-                        for format_id, data in saved_formats.items():
+                        restore_delay = InputSimulator.get_clipboard_restore_delay(saved_formats)
+                        ConfigManager.console_print(
+                            f"Waiting {restore_delay:.2f}s before restoring clipboard after cleanup paste.",
+                            verbose=True,
+                        )
+                        time.sleep(restore_delay)
+
+                        if InputSimulator.safe_open_clipboard():
                             try:
-                                win32clipboard.SetClipboardData(format_id, data)
-                            except:
-                                pass  # Skip if we can't restore a particular format
-                        win32clipboard.CloseClipboard()
+                                current_text = InputSimulator.get_open_clipboard_text()
+                                if InputSimulator.should_restore_clipboard(current_text, cleaned_text):
+                                    win32clipboard.EmptyClipboard()
+                                    restored_formats = InputSimulator.restore_open_clipboard_formats(saved_formats)
+                                    ConfigManager.console_print(
+                                        f"Restored clipboard formats after cleanup paste: {InputSimulator.describe_clipboard_formats(restored_formats)}",
+                                        verbose=True,
+                                    )
+                                else:
+                                    ConfigManager.console_print(
+                                        "Skipping clipboard restore after cleanup paste because clipboard contents changed before restore.",
+                                        verbose=True,
+                                    )
+                            finally:
+                                InputSimulator.safe_close_clipboard()
+                        else:
+                            ConfigManager.console_print("Unable to reopen clipboard for cleanup restore.")
                         
                     # Clear the key chord state
                     self.key_listener.text_cleanup_chord.pressed_keys.clear()
@@ -470,10 +493,7 @@ class WhisperWriterApp(QObject):
         except Exception as e:
             ConfigManager.console_print(f"Error cleaning text: {str(e)}")
         finally:
-            try:
-                win32clipboard.CloseClipboard()
-            except:
-                pass  # Ensure clipboard is closed even if an error occurred
+            InputSimulator.safe_close_clipboard()
             # Ensure key listener is restarted
             self._resume_key_listener_after_processing(listener_was_running)
 
