@@ -406,6 +406,7 @@ class SettingsWindow(BaseWindow):
     def _default_llm_model_choices():
         """Return a curated list of OpenAI model IDs for quick selection."""
         return [
+            'gpt-5.4',
             'gpt-5.3-chat-latest',
             'gpt-5.2',
             'gpt-5.1',

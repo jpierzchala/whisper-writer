@@ -60,6 +60,15 @@ def test_temperature_visibility_toggles(settings_window, qapp):
     assert settings_window._should_hide_temperature() is False
 
 
+def test_default_llm_model_choices_include_gpt54():
+    sys.path.insert(0, 'src')
+    from ui.settings_window import SettingsWindow
+
+    assert 'gpt-5.4' in SettingsWindow._default_llm_model_choices()
+
+    sys.path.pop(0)
+
+
 def test_azure_fields_visible(settings_window, qapp):
     api_combo = settings_window.findChild(QComboBox, 'llm_post_processing_api_type_input')
     _set_combobox_value(api_combo, 'azure_openai')

@@ -29,11 +29,12 @@ def test_cleanup_rejection_reason_allows_small_edit():
     sys.path.pop(0)
 
 
-def test_reasoning_effort_prefers_medium_for_gpt53_chat():
+def test_reasoning_effort_uses_expected_defaults_for_gpt5_variants():
     sys.path.insert(0, 'src')
     from llm_processor import LLMProcessor
 
     assert LLMProcessor._get_preferred_reasoning_effort('gpt-5.3-chat-latest') == 'medium'
+    assert LLMProcessor._get_preferred_reasoning_effort('gpt-5.4') == 'none'
     assert LLMProcessor._get_preferred_reasoning_effort('gpt-5.1') == 'none'
 
     sys.path.pop(0)
