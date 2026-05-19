@@ -93,3 +93,71 @@ def test_transcription_succeeds_after_errors(setup_thread):
     assert transcribe_mock.call_count == 3
     assert not save_mock.called
     assert results == ['ok']
+
+
+def test_recording_status_is_emitted_after_input_stream_starts(monkeypatch):
+    events = []
+
+    class FakeInputStream:
+        def __init__(self, *args, **kwargs):
+            events.append("stream_created")
+
+        def __enter__(self):
+            events.append("stream_started")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("stream_stopped")
+
+    class DummyMediaController:
+        def __init__(self):
+            self.was_playing = False
+            self.initial_state_playing = False
+
+        def pause_media(self):
+            pass
+
+        def resume_media(self):
+            pass
+
+    class MockConfigManager:
+        @staticmethod
+        def console_print(msg):
+            events.append(f"log:{msg}")
+
+        @staticmethod
+        def get_config_value(section, key, default=None):
+            return False
+
+        @staticmethod
+        def get_config_section(section):
+            return {
+                'sample_rate': 16000,
+                'recording_mode': 'press_to_toggle',
+            }
+
+    monkeypatch.setitem(sys.modules, 'sounddevice', types.SimpleNamespace(InputStream=FakeInputStream))
+    monkeypatch.setitem(sys.modules, 'webrtcvad', types.SimpleNamespace(Vad=lambda mode: None))
+    monkeypatch.setitem(sys.modules, 'media_controller', types.SimpleNamespace(MediaController=DummyMediaController))
+    monkeypatch.setitem(sys.modules, 'transcription', types.SimpleNamespace(transcribe=MagicMock(return_value='')))
+    monkeypatch.setitem(sys.modules, 'utils', types.SimpleNamespace(ConfigManager=MockConfigManager))
+
+    if 'result_thread' in sys.modules:
+        del sys.modules['result_thread']
+
+    monkeypatch.syspath_prepend('src')
+    from result_thread import ResultThread
+
+    thread = ResultThread()
+
+    def emit_status(status, use_llm):
+        events.append(f"status:{status}")
+        if status == 'recording':
+            thread.is_recording = False
+
+    thread.statusSignal = types.SimpleNamespace(emit=emit_status)
+    thread.resultSignal = types.SimpleNamespace(emit=lambda result: events.append(f"result:{result}"))
+
+    thread.run()
+
+    assert events.index("stream_started") < events.index("status:recording")
