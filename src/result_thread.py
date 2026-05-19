@@ -83,8 +83,6 @@ class ResultThread(QThread):
             self.is_recording = True
             self.mutex.unlock()
 
-            self.statusSignal.emit('recording', self.use_llm)
-            ConfigManager.console_print('Recording...')
             audio_data = self._record_audio()
 
             if not self.is_running:
@@ -225,6 +223,9 @@ class ResultThread(QThread):
         with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
                             blocksize=frame_size, device=recording_options.get('sound_device'),
                             callback=audio_callback):
+            self.statusSignal.emit('recording', self.use_llm)
+            ConfigManager.console_print('Recording...')
+
             while self.is_running and self.is_recording:
                 data_ready.wait()
                 data_ready.clear()
