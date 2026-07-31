@@ -915,8 +915,12 @@ class SettingsWindow(BaseWindow):
         provider_fields = {
             'openai': ['openai_api_key'],
             'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint',
-                           'azure_openai_llm_cleanup_deployment_name', 'azure_openai_llm_instruction_deployment_name',
-                           'azure_openai_llm_deployment_name', 'azure_openai_llm_api_version'],
+                             'azure_openai_llm_cleanup_deployment_name',
+                             'azure_openai_llm_cleanup_model_family',
+                             'azure_openai_llm_instruction_deployment_name',
+                             'azure_openai_llm_instruction_model_family',
+                             'azure_openai_llm_deployment_name',
+                             'azure_api_mode', 'azure_openai_llm_api_version'],
             'claude': ['claude_api_key'],
             'gemini': ['gemini_api_key'],
             'groq': ['groq_api_key'],
@@ -949,7 +953,8 @@ class SettingsWindow(BaseWindow):
         provider_fields = {
             'openai': ['openai_transcription_api_key', 'base_url'],
             'azure_openai': ['azure_openai_api_key', 'azure_openai_endpoint',
-                           'azure_openai_deployment_name', 'azure_openai_api_version'],
+                             'azure_openai_deployment_name', 'azure_openai_model_family',
+                             'azure_api_mode', 'azure_openai_api_version'],
             'deepgram': ['deepgram_transcription_api_key'],
             'groq': ['groq_transcription_api_key']
         }

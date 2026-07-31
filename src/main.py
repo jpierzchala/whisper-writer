@@ -19,6 +19,7 @@ from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
 from llm_processor import LLMProcessor
+from vocabulary import append_glossary
 
 
 class WhisperWriterApp(QObject):
@@ -265,6 +266,11 @@ class WhisperWriterApp(QObject):
                     ConfigManager.console_print(f"Appended fresh prompt content from {file_path}", verbose=True)
             except Exception as e:
                 ConfigManager.console_print(f"Error reading system message file: {str(e)}")
+
+        # Cleanup modes also get the domain glossary, so terms the transcription
+        # got wrong are normalised to their canonical spelling.
+        if mode_name in ('cleanup', 'text_cleanup'):
+            system_message = append_glossary(system_message)
 
         if log_prompt:
             ConfigManager.console_print(f"Final {mode_name} system message: {system_message}", verbose=True)
