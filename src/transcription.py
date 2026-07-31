@@ -21,6 +21,10 @@ from keyring_manager import KeyringManager
 from text_processor import TextProcessor
 from whisper_languages import normalize_whisper_language
 
+# (connect, read) timeouts for transcription HTTP calls. The read budget has to cover
+# uploading and transcribing a full recording, so it is deliberately generous.
+REQUEST_TIMEOUT = (10, 180)
+
 VOSK_MODEL_URLS = {
     'vosk-model-small-en-us-0.15': 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip',
     'vosk-model-en-us-0.22': 'https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip'
@@ -368,7 +372,8 @@ def transcribe_with_openai(audio_data, api_options):
             f"{base_url}/audio/transcriptions",
             headers=headers,
             files=files,
-            data=data
+            data=data,
+            timeout=REQUEST_TIMEOUT
         )
         
         if response.status_code == 200:
@@ -442,7 +447,8 @@ def transcribe_with_azure_openai(audio_data, api_options):
             headers={'api-key': api_key},  # Simplified headers for Azure OpenAI
             files=files,
             data=data,
-            params=params
+            params=params,
+            timeout=REQUEST_TIMEOUT
         )
         
         if response.status_code == 200:
@@ -496,7 +502,8 @@ def transcribe_with_deepgram(audio_data, api_options):
             DEEPGRAM_BASE_URL,
             headers=headers,
             params=params,
-            data=audio_data
+            data=audio_data,
+            timeout=REQUEST_TIMEOUT
         )
         
         if response.status_code == 200:

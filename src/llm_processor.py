@@ -25,6 +25,10 @@ except Exception:  # pragma: no cover - optional dependency
 # Check if Ollama is available
 HAS_OLLAMA = ollama is not None
 RESPONSES_API_ENDPOINT = "https://api.openai.com/v1/responses"
+CLAUDE_API_ENDPOINT = "https://api.anthropic.com/v1/messages"
+# (connect, read) timeouts for LLM HTTP calls. Post-processing sits on the interactive
+# path, so a hung request must fail rather than block the dictation pipeline forever.
+REQUEST_TIMEOUT = (10, 60)
 REASONING_MODEL_PREFIXES = ("gpt-5", "o1")
 RESPONSES_MODEL_PREFIXES = ("gpt-5",)
 GPT53_CHAT_PREFIXES = ("gpt-5.3-chat",)
@@ -431,9 +435,10 @@ class LLMProcessor:
         try:
             ConfigManager.console_print(f"Sending request to Claude API with model {model}")
             response = requests.post(
-                self.config['endpoint'],
+                CLAUDE_API_ENDPOINT,
                 headers=headers,
-                json=data
+                json=data,
+                timeout=REQUEST_TIMEOUT
             )
             
             ConfigManager.console_print(f"Claude API response status: {response.status_code}", verbose=True)
@@ -495,7 +500,8 @@ class LLMProcessor:
             response = requests.post(
                 'https://api.openai.com/v1/chat/completions',
                 headers=headers,
-                json=data
+                json=data,
+                timeout=REQUEST_TIMEOUT
             )
             
             ConfigManager.console_print(f"OpenAI API response status: {response.status_code}", verbose=True)
@@ -675,9 +681,10 @@ class LLMProcessor:
             response = requests.post(
                 endpoint,
                 headers=headers,
-                json=data
+                json=data,
+                timeout=REQUEST_TIMEOUT
             )
-            
+
             ConfigManager.console_print(f"Gemini API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
@@ -890,9 +897,10 @@ class LLMProcessor:
             response = requests.post(
                 base_url,
                 headers=headers,
-                json=data
+                json=data,
+                timeout=REQUEST_TIMEOUT
             )
-            
+
             self._safe_console_print(f"Azure OpenAI LLM API response status: {response.status_code}", verbose=True)
             
             if response.status_code == 200:
@@ -998,15 +1006,20 @@ class LLMProcessor:
             return False
     
     def get_available_models(self, api_type):
-        """Get available models for the specified API type."""
-        ConfigManager.console_print(f"\n=== Fetching models for API type: {api_type} ===")
-        
-        # Validate API type early
+        """Get available models for the specified API type.
+
+        Returns an empty list when the provider cannot be queried; callers fall back
+        to their own curated list of known model IDs.
+        """
+        ConfigManager.console_print(f"Fetching models for API type: {api_type}")
+
+        # Azure exposes deployments (not models) and listing them needs the ARM API,
+        # which we deliberately do not call. Callers offer a curated list instead.
         if api_type not in ['claude', 'openai', 'gemini', 'ollama', 'groq']:
-            ConfigManager.console_print(f"Unsupported API type: {api_type}")
+            ConfigManager.console_print(f"Model listing not supported for API type: {api_type}")
             return []
-        
-        # Get API key early for all non-Ollama types
+
+        api_key = None
         if api_type != 'ollama':
             api_key_map = {
                 'claude': 'claude',
@@ -1018,69 +1031,54 @@ class LLMProcessor:
             if not api_key:
                 ConfigManager.console_print(f"No {api_type} API key found")
                 return []
-        
+
         try:
             if api_type == 'groq':
-                client = Groq(api_key=api_key)
-                
-                ConfigManager.console_print("Making request to Groq models endpoint...")
-                models_response = client.models.list()
-                
-                # Extract model IDs from the response
-                models = [model.id for model in models_response.data]
-                ConfigManager.console_print(f"Found Groq models: {models}")
-                return models
+                if Groq is None:
+                    ConfigManager.console_print("Groq SDK not available")
+                    return []
+                models = [model.id for model in Groq(api_key=api_key).models.list().data]
 
             elif api_type == 'claude':
                 headers = {
                     'anthropic-version': '2023-06-01',
                     'x-api-key': api_key
                 }
-                
-                ConfigManager.console_print("Making request to Claude models endpoint...")
-                response = requests.get('https://api.anthropic.com/v1/models', headers=headers)
-                ConfigManager.console_print(f"Claude API response status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    models_data = response.json()
-                    models = [model['id'] for model in models_data.get('data', [])]
-                    ConfigManager.console_print(f"Found Claude models: {models}")
-                    return models
-                ConfigManager.console_print(f"Claude API error: {response.status_code} - {response.text}")
-                
+                response = requests.get(
+                    'https://api.anthropic.com/v1/models',
+                    headers=headers,
+                    timeout=REQUEST_TIMEOUT
+                )
+                if response.status_code != 200:
+                    ConfigManager.console_print(f"Claude API error: {response.status_code} - {response.text}")
+                    return []
+                models = [model['id'] for model in response.json().get('data', [])]
+
             elif api_type == 'openai':
-                import openai
-                openai.api_key = api_key
-                
-                ConfigManager.console_print("Fetching OpenAI models...")
-                model_list_response = openai.Model.list()
-                models = [model.id for model in model_list_response.data]
-                ConfigManager.console_print(f"Found OpenAI models: {models}")
-                return models
-                
+                from openai import OpenAI
+                models = [model.id for model in OpenAI(api_key=api_key).models.list()]
+
             elif api_type == 'gemini':
                 if genai is None:
+                    ConfigManager.console_print("Gemini SDK not available")
                     return []
                 genai.configure(api_key=api_key)
-                models = [m.name for m in genai.list_models() 
-                         if 'generateContent' in m.supported_generation_methods]
-                ConfigManager.console_print(f"Found Gemini models: {models}")
-                return models
-                
-            elif api_type == 'ollama':
-                if not HAS_OLLAMA:
-                    ConfigManager.console_print("Ollama not available")
+                models = [
+                    model.name for model in genai.list_models()
+                    if 'generateContent' in model.supported_generation_methods
+                ]
+
+            else:  # ollama
+                # Ollama lists locally installed models on /api/tags.
+                response = requests.get('http://localhost:11434/api/tags', timeout=(2, 10))
+                if response.status_code != 200:
+                    ConfigManager.console_print(f"Ollama API error: {response.status_code} - {response.text}")
                     return []
-                
-                response = requests.get('http://localhost:11434/api/models')
-                if response.status_code == 200:
-                    models_data = response.json()
-                    models = [model['name'] for model in models_data.get('models', [])]
-                    ConfigManager.console_print(f"Found Ollama models: {models}")
-                    return models
-                ConfigManager.console_print(f"Ollama API error: {response.status_code} - {response.text}")
-                
+                models = [model['name'] for model in response.json().get('models', [])]
+
+            ConfigManager.console_print(f"Found {len(models)} {api_type} models")
+            return models
+
         except Exception as e:
             ConfigManager.console_print(f"Error fetching {api_type} models: {str(e)}")
-        
-        return []
+            return []

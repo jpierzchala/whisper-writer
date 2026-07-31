@@ -136,7 +136,7 @@ else:
             """
             Move the window when dragging.
             """
-            if Qt.LeftButton and self.is_dragging:
+            if self.is_dragging and event.buttons() & Qt.LeftButton:
                 self.move(event.globalPos() - self.start_position)
                 event.accept()
 

@@ -25,6 +25,22 @@ TEXT_INPUT_WIDGET_TYPES = tuple(
 QWIDGET_IS_TYPE = isinstance(QWidget, type)
 QLINEEDIT_IS_TYPE = isinstance(QLineEdit, type)
 REASONING_MODEL_PREFIXES = ('gpt-5', 'o1')
+
+# Single source of truth mapping a secret config key to its keyring entry name.
+# Keyed by (category, key) because the same key name can appear in several sections.
+KEYRING_SERVICE_BY_CONFIG_KEY = {
+    ('model_options', 'openai_transcription_api_key'): 'openai_transcription',
+    ('model_options', 'deepgram_transcription_api_key'): 'deepgram_transcription',
+    ('model_options', 'groq_transcription_api_key'): 'groq_transcription',
+    ('model_options', 'azure_openai_api_key'): 'azure_openai_transcription',
+    ('llm_post_processing', 'claude_api_key'): 'claude',
+    ('llm_post_processing', 'openai_api_key'): 'openai_llm',
+    ('llm_post_processing', 'azure_openai_llm_api_key'): 'azure_openai_llm',
+    ('llm_post_processing', 'gemini_api_key'): 'gemini',
+    ('llm_post_processing', 'groq_api_key'): 'groq',
+}
+KEYRING_SERVICE_BY_KEY = {key: name for (_, key), name in KEYRING_SERVICE_BY_CONFIG_KEY.items()}
+
 API_TYPE_LABELS = {
     'openai': 'OpenAI API',
     'azure_openai': 'Azure OpenAI',
@@ -46,10 +62,10 @@ class SettingsWindow(BaseWindow):
         ConfigManager.initialize()
         self.schema = ConfigManager.get_schema()
         self.llm_processor = None  # Initialize to None
-        self.model_combo = None
         self.cleanup_model_combo = None
         self.instruction_model_combo = None
-        self.refresh_thread = None  # Add thread reference
+        self.refresh_thread = None  # Active model-refresh thread, if any
+        self.refresh_worker = None
         self.headless_mode = QT_WIDGETS_ARE_MOCKED
         if not self.headless_mode:
             self.init_settings_ui()
@@ -451,25 +467,9 @@ class SettingsWindow(BaseWindow):
         
         if password_mode:
             widget.setEchoMode(QLineEdit.Password)
-            # Load appropriate API key from keyring
-            if key == 'openai_transcription_api_key':
-                widget.setText(KeyringManager.get_api_key("openai_transcription") or value)
-            elif key == 'deepgram_transcription_api_key':
-                widget.setText(KeyringManager.get_api_key("deepgram_transcription") or value)
-            elif key == 'groq_transcription_api_key':
-                widget.setText(KeyringManager.get_api_key("groq_transcription") or value)
-            elif key == 'azure_openai_api_key':
-                widget.setText(KeyringManager.get_api_key("azure_openai_transcription") or value)
-            elif key == 'azure_openai_llm_api_key':
-                widget.setText(KeyringManager.get_api_key("azure_openai_llm") or value)
-            elif key == 'claude_api_key':
-                widget.setText(KeyringManager.get_api_key("claude") or value)
-            elif key == 'openai_api_key':
-                widget.setText(KeyringManager.get_api_key("openai_llm") or value)
-            elif key == 'gemini_api_key':
-                widget.setText(KeyringManager.get_api_key("gemini") or value)
-            elif key == 'groq_api_key':
-                widget.setText(KeyringManager.get_api_key("groq") or value)
+            keyring_name = KEYRING_SERVICE_BY_KEY.get(key)
+            if keyring_name:
+                widget.setText(KeyringManager.get_api_key(keyring_name) or value)
         elif key == 'model_path':
             widget.setPlaceholderText("Optional: Path to local model file")
         
@@ -490,8 +490,10 @@ class SettingsWindow(BaseWindow):
 
     def get_config_value(self, category, sub_category, key, meta):
         if sub_category:
-            return ConfigManager.get_config_value(category, sub_category, key) or meta['value']
-        return ConfigManager.get_config_value(category, key) or meta['value']
+            value = ConfigManager.get_config_value(category, sub_category, key)
+        else:
+            value = ConfigManager.get_config_value(category, key)
+        return value if value is not None else meta['value']
 
     def browse_model_path(self, widget):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Whisper Model File", "", "Model Files (*.bin);;All Files (*)")
@@ -507,38 +509,11 @@ class SettingsWindow(BaseWindow):
         ConfigManager.console_print("Saving settings...")
         self.iterate_settings(self.save_setting)
 
-        # Save API keys to keyring
-        openai_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'openai_transcription_api_key') or ''
-        deepgram_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'deepgram_transcription_api_key') or ''
-        groq_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'groq_transcription_api_key') or ''
-        azure_openai_key = ConfigManager.get_config_value('model_options', 'api', 'azure_openai_api_key') or ''
-        claude_api_key = ConfigManager.get_config_value('llm_post_processing', 'claude_api_key') or ''
-        openai_llm_key = ConfigManager.get_config_value('llm_post_processing', 'openai_api_key') or ''
-        azure_openai_llm_key = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_api_key') or ''
-        gemini_api_key = ConfigManager.get_config_value('llm_post_processing', 'gemini_api_key') or ''
-        groq_api_key = ConfigManager.get_config_value('llm_post_processing', 'groq_api_key') or ''
-        
-        # Save to keyring
-        KeyringManager.save_api_key("openai_transcription", openai_transcription_key)
-        KeyringManager.save_api_key("deepgram_transcription", deepgram_transcription_key)
-        KeyringManager.save_api_key("groq_transcription", groq_transcription_key)
-        KeyringManager.save_api_key("azure_openai_transcription", azure_openai_key)
-        KeyringManager.save_api_key("claude", claude_api_key)
-        KeyringManager.save_api_key("openai_llm", openai_llm_key)
-        KeyringManager.save_api_key("azure_openai_llm", azure_openai_llm_key)
-        KeyringManager.save_api_key("gemini", gemini_api_key)
-        KeyringManager.save_api_key("groq", groq_api_key)
-        
-        # Remove API keys from config
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'openai_transcription_api_key')
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'deepgram_transcription_api_key')
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'groq_transcription_api_key')
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'azure_openai_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'claude_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'openai_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'azure_openai_llm_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'gemini_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'groq_api_key')
+        # Move secrets from the config into the keyring, then blank them in the config
+        for (category, key), keyring_name in KEYRING_SERVICE_BY_CONFIG_KEY.items():
+            path = (category, 'api', key) if category == 'model_options' else (category, key)
+            KeyringManager.save_api_key(keyring_name, ConfigManager.get_config_value(*path) or '')
+            ConfigManager.set_config_value(None, *path)
 
         ConfigManager.save_config()
         
@@ -618,44 +593,21 @@ class SettingsWindow(BaseWindow):
     def update_widgets_from_config(self):
         """Update all widgets with values from the current configuration."""
         ConfigManager.console_print("Updating widgets from config...")
-        
-        # Load API keys from keyring
-        whisper_key = KeyringManager.get_api_key("whisper")
-        claude_key = KeyringManager.get_api_key("claude")
-        openai_key = KeyringManager.get_api_key("openai_llm")
-        gemini_key = KeyringManager.get_api_key("gemini")
-        groq_key = KeyringManager.get_api_key("groq")
-        
-        ConfigManager.console_print("Loading API keys from keyring...")
-        
+
         self.iterate_settings(self.update_widget_value)
-        
-        # Update API key fields
-        for widget, category, sub_category, key, _ in self.iterate_settings():
-            if category == 'model_options' and sub_category == 'api' and key == 'api_key':
-                widget.setText(whisper_key)
-                ConfigManager.console_print("Set Whisper API key widget")
-            elif category == 'llm_post_processing':
-                if key == 'claude_api_key':
-                    widget.setText(claude_key)
-                    ConfigManager.console_print("Set Claude API key widget")
-                elif key == 'openai_api_key':
-                    widget.setText(openai_key)
-                    ConfigManager.console_print("Set OpenAI LLM key widget")
-                elif key == 'gemini_api_key':
-                    widget.setText(gemini_key)
-                    ConfigManager.console_print("Set Gemini API key widget")    
-                elif key == 'groq_api_key':
-                    widget.setText(groq_key)
-                    ConfigManager.console_print("Set Groq API key widget")
+
+        # Secret fields are not stored in the config file, so refill them from the keyring
+        for widget, category, sub_category, key, _ in self.iter_setting_widgets():
+            keyring_name = KEYRING_SERVICE_BY_CONFIG_KEY.get((category, key))
+            if keyring_name and hasattr(widget, 'setText'):
+                widget.setText(KeyringManager.get_api_key(keyring_name) or '')
 
     def update_widget_value(self, widget, category, sub_category, key, meta):
         """Update a single widget with its value from the config."""
-        # Skip API key fields as they're handled separately
-        if (category == 'model_options' and sub_category == 'api' and key == 'api_key') or \
-           (category == 'llm_post_processing' and key == 'api_key'):
+        # Skip API key fields as they're refilled from the keyring separately
+        if (category, key) in KEYRING_SERVICE_BY_CONFIG_KEY:
             return
-        
+
         value = self.get_config_value(category, sub_category, key, meta)
         self.set_widget_value(widget, value, meta.get('type'))
 
@@ -751,19 +703,24 @@ class SettingsWindow(BaseWindow):
             if help_button:
                 help_button.setVisible(use_api if sub_category == 'api' else not use_api)
 
-    def iterate_settings(self, func):
-        """Iterate over all settings and apply a function to each."""
+    def iter_setting_widgets(self):
+        """Yield (widget, category, sub_category, key, meta) for every settings widget."""
         for category, settings in self.schema.items():
             for sub_category, sub_settings in settings.items():
                 if isinstance(sub_settings, dict) and 'value' in sub_settings:
                     widget = self.findChild(QWidget, f"{category}_{sub_category}_input")
                     if widget:
-                        func(widget, category, None, sub_category, sub_settings)
+                        yield widget, category, None, sub_category, sub_settings
                 else:
                     for key, meta in sub_settings.items():
                         widget = self.findChild(QWidget, f"{category}_{sub_category}_{key}_input")
                         if widget:
-                            func(widget, category, sub_category, key, meta)
+                            yield widget, category, sub_category, key, meta
+
+    def iterate_settings(self, func):
+        """Iterate over all settings and apply a function to each."""
+        for widget, category, sub_category, key, meta in self.iter_setting_widgets():
+            func(widget, category, sub_category, key, meta)
 
     def handleCloseButton(self):
         """Override base window close button handler to hide instead of close."""
@@ -776,197 +733,113 @@ class SettingsWindow(BaseWindow):
         self.settings_closed.emit()
         self.hide()
 
-    def load_settings(self):
-        """Load settings from config and keyring."""
-        # Get API keys from keyring
-        openai_transcription_key = KeyringManager.get_api_key("openai_transcription") or ''
-        deepgram_transcription_key = KeyringManager.get_api_key("deepgram_transcription") or ''
-        groq_transcription_key = KeyringManager.get_api_key("groq_transcription") or ''
-        claude_key = KeyringManager.get_api_key("claude") or ''
-        openai_key = KeyringManager.get_api_key("openai_llm") or ''
-        gemini_key = KeyringManager.get_api_key("gemini") or ''
-        groq_key = KeyringManager.get_api_key("groq") or ''
-
-        # Update API key fields
-        for widget, category, sub_category, key, _ in self.iterate_settings():
-            if category == 'model_options' and sub_category == 'api':
-                if key == 'openai_transcription_api_key':
-                    widget.setText(openai_transcription_key)
-                elif key == 'deepgram_transcription_api_key':
-                    widget.setText(deepgram_transcription_key)
-                elif key == 'groq_transcription_api_key':
-                    widget.setText(groq_transcription_key)
-            elif category == 'llm_post_processing':
-                if key == 'claude_api_key':
-                    widget.setText(claude_key)
-                elif key == 'openai_api_key':
-                    widget.setText(openai_key)
-                elif key == 'gemini_api_key':
-                    widget.setText(gemini_key)
-                elif key == 'groq_api_key':
-                    widget.setText(groq_key)
-
-    def create_model_selector(self):
-        """Create text fields for model selection."""
-        container = QWidget()
-        layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create the text fields
-        self.cleanup_model_input = QLineEdit()
-        self.cleanup_model_input.setObjectName('llm_post_processing_cleanup_model_input')
-        
-        self.instruction_model_input = QLineEdit()
-        self.instruction_model_input.setObjectName('llm_post_processing_instruction_model_input')
-        
-        # Add to layout
-        layout.addWidget(self.cleanup_model_input)
-        layout.addWidget(self.instruction_model_input)
-        
-        container.setLayout(layout)
-        return container
+    def closeEvent(self, event):
+        """Make sure a running model refresh cannot outlive the window."""
+        thread = self.refresh_thread
+        if thread and thread.isRunning():
+            thread.quit()
+            thread.wait(2000)
+        super().closeEvent(event)
 
     def refresh_model_choices(self, combo_box=None):
-        """Refresh the model choices based on the selected API type."""
-        ConfigManager.console_print("\n=== Starting Model Refresh ===")
-        ConfigManager.console_print(f"Combo box type: {type(combo_box)}")
-        
+        """Fetch the available models for the selected API type on a worker thread."""
         api_type_combo = self.findChild(QComboBox, 'llm_post_processing_api_type_input')
         if not api_type_combo:
             ConfigManager.console_print("Error: API type combo box not found")
             return
-            
+
         api_type = self._get_combobox_value(api_type_combo)
-        ConfigManager.console_print(f"Selected API type: {api_type}")
-        
-        # Initialize LLM processor if needed
+        ConfigManager.console_print(f"Refreshing model list for API type: {api_type}")
+
         if not self.llm_processor:
-            ConfigManager.console_print("Initializing LLM processor...")
             self.llm_processor = LLMProcessor(api_type=api_type)
         else:
             self.llm_processor.api_type = api_type
-        
-        # Find the combo boxes in the UI
-        cleanup_combo = self.findChild(QComboBox, 'llm_post_processing_cleanup_model_input')
-        instruction_combo = self.findChild(QComboBox, 'llm_post_processing_instruction_model_input')
-        
-        ConfigManager.console_print(f"Found cleanup combo: {cleanup_combo}")
-        ConfigManager.console_print(f"Found instruction combo: {instruction_combo}")
-        
-        # If a specific combo box was passed, only update that one
-        if combo_box and isinstance(combo_box, QComboBox):
-            combos_to_update = [combo_box]
-        else:
-            combos_to_update = []
-            if cleanup_combo:
-                combos_to_update.append(cleanup_combo)
-            if instruction_combo:
-                combos_to_update.append(instruction_combo)
-        
-        ConfigManager.console_print(f"Will update {len(combos_to_update)} combo boxes")
-        ConfigManager.console_print(f"Combo boxes to update: {[combo.objectName() for combo in combos_to_update]}")
-        
-        # Try fetching models
-        try:
-            models = self.llm_processor.get_available_models(api_type)
-            ConfigManager.console_print(f"Direct fetch results: {models}")
-            if models:
-                self.update_model_combos(models, combos_to_update)
-        except Exception as e:
-            ConfigManager.console_print(f"Error fetching models: {str(e)}")
 
-    def update_model_combos(self, models, combos_to_update):
-        """Update combo boxes with fetched models."""
-        ConfigManager.console_print("\n=== Updating Model Combos ===")
-        ConfigManager.console_print(f"Received models: {models}")
-        ConfigManager.console_print(f"Number of combos to update: {len(combos_to_update)}")
-        ConfigManager.console_print(f"Combo boxes to update: {[combo.objectName() for combo in combos_to_update]}")
-        
-        # Ensure we're on the main thread
-        if QThread.currentThread() != QApplication.instance().thread():
-            ConfigManager.console_print("Warning: Updating from background thread, moving to main thread")
-            QApplication.instance().processEvents()
-        
+        combos = self._model_combos()
+        if not combos:
+            return
+
+        # A refresh is already running; it will pick up the latest api_type when it finishes.
+        if self.refresh_thread is not None:
+            return
+
+        for combo in combos:
+            combo.setEnabled(False)
+            if combo.lineEdit():
+                combo.lineEdit().setPlaceholderText("Loading models…")
+
+        self.refresh_thread = QThread(self)
+        self.refresh_worker = ModelRefreshWorker(self.llm_processor, api_type)
+        self.refresh_worker.moveToThread(self.refresh_thread)
+        self.refresh_thread.started.connect(self.refresh_worker.run)
+        self.refresh_worker.finished.connect(self._on_models_fetched)
+        self.refresh_worker.finished.connect(self.refresh_thread.quit)
+        self.refresh_thread.finished.connect(self._on_refresh_thread_finished)
+        self.refresh_thread.start()
+
+    def _model_combos(self):
+        """Return the cleanup/instruction model combo boxes that exist in the UI."""
+        return [combo for combo in (self.cleanup_model_combo, self.instruction_model_combo) if combo]
+
+    def _on_refresh_thread_finished(self):
+        """Tear down the finished refresh thread so a later refresh can start."""
+        thread, self.refresh_thread = self.refresh_thread, None
+        self.refresh_worker = None
+        if thread:
+            thread.deleteLater()
+
+    def _on_models_fetched(self, models):
+        """Populate the model combos with the fetched list (runs on the UI thread)."""
+        api_type = self.llm_processor.api_type if self.llm_processor else None
+        options = list(models or [])
+        status = ''
+
+        if not options:
+            if api_type in ('openai', 'azure_openai'):
+                options = self._default_llm_model_choices()
+                status = "Could not fetch models – showing known model IDs"
+            elif api_type == 'ollama':
+                status = "No models found – is Ollama running?"
+            else:
+                status = "No models available – check the API key"
+            ConfigManager.console_print(f"Model refresh: {status or 'no models returned'}")
+
+        self.update_model_combos(options, self._model_combos(), status)
+
+    def update_model_combos(self, models, combos_to_update, status=''):
+        """Repopulate the given combo boxes, preserving each current selection."""
+        combo_options = [str(model) for model in (models or [])]
+
         for combo in combos_to_update:
-            if not combo:
-                ConfigManager.console_print("Error: Null combo box encountered")
-                continue
-            
             if not isinstance(combo, QComboBox):
-                ConfigManager.console_print(f"Error: Invalid combo box type: {type(combo)}")
                 continue
-            
-            ConfigManager.console_print(f"\nUpdating combo box: {combo.objectName()}")
-            ConfigManager.console_print(f"Combo box exists: {combo is not None}")
-            ConfigManager.console_print(f"Combo box visible: {combo.isVisible()}")
-            ConfigManager.console_print(f"Combo box enabled: {combo.isEnabled()}")
-            ConfigManager.console_print(f"Current items: {[combo.itemText(i) for i in range(combo.count())]}")
-            
-            # Store current state
-            was_enabled = combo.isEnabled()
-            current_text = combo.currentText()
-            ConfigManager.console_print(f"Current state - enabled: {was_enabled}, text: {current_text}")
-            
-            # Block signals and clear
+
+            # Fall back to the configured value when nothing is typed in the combo yet.
+            desired_text = combo.currentText()
+            if not desired_text:
+                config_key = 'cleanup_model' if combo is self.cleanup_model_combo else 'instruction_model'
+                desired_text = ConfigManager.get_config_value('llm_post_processing', config_key) or ''
+
             combo.blockSignals(True)
             combo.clear()
-            ConfigManager.console_print("Cleared combo box")
-            
-            combo_options = list(models or [])
-            if not combo_options and self.llm_processor and self.llm_processor.api_type == 'openai':
-                combo_options = self._default_llm_model_choices()
-                ConfigManager.console_print("Using default OpenAI model list for dropdown population")
-            elif not combo_options:
-                message = "No models found - Is Ollama running?" if self.llm_processor and self.llm_processor.api_type == 'ollama' else "No models available - Check API key"
-                combo.addItem(message)
-                ConfigManager.console_print(f"Added message: {message}")
-            
-            for model_option in combo_options:
-                combo.addItem(str(model_option))
-                ConfigManager.console_print(f"Added model: {model_option}")
-            
-            # Determine the desired selection preference
-            desired_text = current_text or ''
-            if not desired_text:
-                config_key = 'cleanup_model' if combo == self.cleanup_model_combo else 'instruction_model'
-                desired_text = ConfigManager.get_config_value('llm_post_processing', config_key) or ''
-                ConfigManager.console_print(f"Config model fallback for {config_key}: {desired_text}")
-            
+            combo.addItems(combo_options)
+
             if desired_text:
                 index = combo.findText(desired_text)
-                if index == -1 and combo_options:
+                if index == -1:
                     combo.insertItem(0, desired_text)
                     index = 0
-                    ConfigManager.console_print(f"Inserted custom model at top: {desired_text}")
-                if index >= 0:
-                    combo.setCurrentIndex(index)
-                    ConfigManager.console_print(f"Set combo selection to: {desired_text}")
-            elif combo.count() > 0:
+                combo.setCurrentIndex(index)
+            elif combo.count():
                 combo.setCurrentIndex(0)
-                ConfigManager.console_print(f"Defaulted combo selection to: {combo.currentText()}")
-            
-            # Restore state and force update
-            combo.setEnabled(True)
             combo.blockSignals(False)
-            combo.repaint()
-            
-            # Verify final state
-            ConfigManager.console_print(f"Final state - count: {combo.count()}")
-            ConfigManager.console_print(f"Final items: {[combo.itemText(i) for i in range(combo.count())]}")
-            ConfigManager.console_print(f"Current text: {combo.currentText()}")
-            ConfigManager.console_print(f"Enabled: {combo.isEnabled()}")
-            ConfigManager.console_print(f"Visible: {combo.isVisible()}")
-        
-        # Force a UI update
-        QApplication.processEvents()
-        ConfigManager.console_print("=== UI update complete ===\n")
-        self.update_temperature_visibility()
 
-    def showEvent(self, event):
-        """Handle window show event to initialize models."""
-        super().showEvent(event)
-        if self.model_combo:
-            self.refresh_model_choices()
+            combo.setEnabled(True)
+            if combo.lineEdit():
+                combo.lineEdit().setPlaceholderText(status)
+
+        self.update_temperature_visibility()
 
     def browse_system_message_file(self, file_edit, text_edit):
         """Browse for a system message file and load its contents."""
@@ -975,9 +848,7 @@ class SettingsWindow(BaseWindow):
             file_edit.setText(file_path)
             try:
                 with open(file_path, 'r', encoding='utf-8') as file:
-                    content = file.read()
-                    current_text = text_edit.toPlainText()
-                    text_edit.setText(current_text)
+                    text_edit.setText(file.read())
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to read file: {str(e)}")
 
@@ -1050,38 +921,14 @@ class SettingsWindow(BaseWindow):
             'ollama': []  # No API key needed for Ollama
         }
         
-        # Hide all provider-specific fields first
-        all_fields = []
-        for fields in provider_fields.values():
-            all_fields.extend(fields)
-        
+        all_fields = {field for fields in provider_fields.values() for field in fields}
+        selected_fields = set(provider_fields.get(provider, []))
+
         for field in all_fields:
-            widget = self.findChild(QWidget, f'llm_post_processing_{field}_input')
-            label = self.findChild(QLabel, f'llm_post_processing_{field}_label')
-            help_button = self.findChild(QToolButton, f'llm_post_processing_{field}_help')
-            
-            if widget:
-                widget.setVisible(False)
-            if label:
-                label.setVisible(False)
-            if help_button:
-                help_button.setVisible(False)
-        
-        # Show only the fields for the selected provider
-        if provider in provider_fields:
-            for field in provider_fields[provider]:
-                widget = self.findChild(QWidget, f'llm_post_processing_{field}_input')
-                label = self.findChild(QLabel, f'llm_post_processing_{field}_label')
-                help_button = self.findChild(QToolButton, f'llm_post_processing_{field}_help')
-                
-                if widget:
-                    widget.setVisible(True)
-                    ConfigManager.console_print(f"Showing widget for {field}")
-                if label:
-                    label.setVisible(True)
-                if help_button:
-                    help_button.setVisible(True)
-        
+            self._set_setting_row_visible(
+                'llm_post_processing', None, field, field in selected_fields
+            )
+
         ConfigManager.console_print(f"Finished toggling options for provider: {provider}")
         self.update_temperature_visibility()
 
@@ -1093,39 +940,37 @@ class SettingsWindow(BaseWindow):
                 provider = self._get_combobox_value(provider_combo)
             else:
                 return
-        
+
         ConfigManager.console_print(f"Toggling transcription provider options for: {provider}")
-        
+
         # Map of provider to their specific fields
         provider_fields = {
-            'openai': ['openai_transcription_api_key'],
-            'azure_openai': ['azure_openai_api_key', 'azure_openai_endpoint', 
+            'openai': ['openai_transcription_api_key', 'base_url'],
+            'azure_openai': ['azure_openai_api_key', 'azure_openai_endpoint',
                            'azure_openai_deployment_name', 'azure_openai_api_version'],
             'deepgram': ['deepgram_transcription_api_key'],
             'groq': ['groq_transcription_api_key']
         }
-        
-        # Hide all provider-specific fields first
-        all_fields = []
-        for fields in provider_fields.values():
-            all_fields.extend(fields)
-        
+
+        # Only touch fields while the API section itself is visible; in local mode
+        # toggle_api_local_options owns their visibility.
+        use_api_checkbox = self.findChild(QCheckBox, 'model_options_use_api_input')
+        if use_api_checkbox and not use_api_checkbox.isChecked():
+            return
+
+        all_fields = {field for fields in provider_fields.values() for field in fields}
+        selected_fields = set(provider_fields.get(provider, []))
+
         for field in all_fields:
-            widget = self.findChild(QWidget, f'model_options_api_{field}_input')
-            label = self.findChild(QLabel, f'model_options_api_{field}_label')
-            help_button = self.findChild(QToolButton, f'model_options_api_{field}_help')
-            
-            if widget:
-                widget.setVisible(False)
-            if label:
-                label.setVisible(False)
-            if help_button:
-                help_button.setVisible(False)
-        
-        # Show only the fields for the selected provider
-        if provider in provider_fields:
-            for field in provider_fields[provider]:
-                widget = self.findChild(QWidget, f'model_options_api_{field}_input')
-                label = self.findChild(QLabel, f'model_options_api_{field}_label')
-                help_button = self.findChild(QToolButton, f'model_options_api_{field}_help')
+            self._set_setting_row_visible(
+                'model_options', 'api', field, field in selected_fields
+            )
+
+    def _set_setting_row_visible(self, category, sub_category, key, visible):
+        """Show or hide a settings row (input, label and help button) as a unit."""
+        prefix = f'{category}_{sub_category}_{key}' if sub_category else f'{category}_{key}'
+        for widget_type, suffix in ((QWidget, 'input'), (QLabel, 'label'), (QToolButton, 'help')):
+            element = self.findChild(widget_type, f'{prefix}_{suffix}')
+            if element:
+                element.setVisible(visible)
                 
