@@ -95,18 +95,31 @@ class ConfigManager:
             schema = yaml.safe_load(file)
         return schema
 
+    @staticmethod
+    def is_schema_metadata(key):
+        """True for schema keys that describe the UI rather than declare a setting.
+
+        Metadata keys are underscore-prefixed (`_ui`) so they can sit alongside
+        settings without the loaders mistaking them for a nested settings group.
+        """
+        return isinstance(key, str) and key.startswith('_')
+
     def load_default_config(self):
         """Load default configuration values from the schema."""
         def extract_value(item):
             if isinstance(item, dict):
                 if 'value' in item:
                     return item['value']
-                else:
-                    return {k: extract_value(v) for k, v in item.items()}
+                return {
+                    key: extract_value(value) for key, value in item.items()
+                    if not ConfigManager.is_schema_metadata(key)
+                }
             return item
 
         config = {}
         for category, settings in self.schema.items():
+            if self.is_schema_metadata(category):
+                continue
             config[category] = extract_value(settings)
         return config
 

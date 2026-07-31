@@ -15,6 +15,7 @@ from result_thread import ResultThread
 from ui.main_window import MainWindow
 from ui.settings_window import SettingsWindow
 from ui.status_window import StatusWindow
+from ui.theme import apply_theme
 from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
@@ -32,6 +33,8 @@ class WhisperWriterApp(QObject):
         super().__init__()
         self.app = QApplication(sys.argv)
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
+        # Style every window from one stylesheet, following the system light/dark mode.
+        apply_theme(self.app)
 
         ConfigManager.initialize()
         
