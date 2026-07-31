@@ -15,7 +15,7 @@
 | `keywords[]` akceptowane (17 i 49 termów) | słownik trafia do STT |
 | singularne `language` **cicho ignorowane** przez gpt-transcribe | przełączanie pola per model jest obowiązkowe, nie kosmetyczne |
 | A/B cleanup na 5 realnych dyktatach PL: `gpt-5.4-global` 3,69 s vs `gpt-5.6-luna-datazone` **2,75 s** | Luna przyjęta jako default (26% szybciej, ~12× taniej, zero odrzuceń) |
-| Luna gubiła łamania linii wymagane przez prompt | naprawione zaostrzeniem reguły w prompcie (jest w `clenup prompt.slim.txt`) |
+| Luna gubiła łamania linii wymagane przez prompt | złagodzone zaostrzeniem reguły w prompcie — poprawa jest wyraźna, ale niedeterministyczna (patrz „Pozostałe ograniczenia") |
 | Polski transkrybowany poprawnie | otwarte pytanie zamknięte |
 
 
@@ -537,3 +537,17 @@ Weryfikacja końcowa (checklist):
    naturalny kandydat na kolejną iterację dla trybu continuous.
 6. Liczby latencji AA pochodzą z benchmarku o profilu ~1k tokenów promptu — końcowa
    decyzja o modelu opiera się na własnym pomiarze w aplikacji (checklist §7).
+
+---
+
+## Pozostałe ograniczenia
+
+- **Łamania linii w cleanupie nie są deterministyczne.** Zaostrzona reguła w prompcie
+  („jedno zdanie na linię, pusta linia tylko przy zmianie tematu") wyraźnie poprawiła
+  zachowanie gpt-5.6-luna, ale na krótkich, spójnych tematycznie dyktatach model nadal
+  zwraca jeden akapit. Zmierzone na 4 nagraniach: 6/2/0/4 łamań przy ~6/4/4/2 zdaniach.
+  Formatowanie tego typu to deterministyczna operacja na tekście — właściwym miejscem
+  jest warstwa `post_processing`, nie prompt.
+- **Prompty nie są w repozytorium.** Pliki `*.txt` są ignorowane, bo prompt cleanupu
+  zawiera osobiste terminy domenowe i styl pracy autora, a aplikacja czyta go ze
+  ścieżki w ustawieniach. Wartości domyślne żyją w `config_schema.yaml`.
