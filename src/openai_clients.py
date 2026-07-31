@@ -26,6 +26,44 @@ AZURE_ENDPOINT_SUFFIXES = (
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 2
 
+# Used when legacy mode is selected but the configured api-version is not a dated
+# one (typically because the user flipped the mode and left the version at "v1",
+# which the legacy data plane rejects). Recent enough to support structured outputs.
+FALLBACK_LEGACY_API_VERSION = '2025-03-01-preview'
+
+# Structured outputs (response_format json_schema) reached the dated Azure API in
+# this version; older ones reject the request outright.
+STRUCTURED_OUTPUT_MIN_API_VERSION = '2024-08-01'
+
+
+def is_dated_api_version(api_version: str) -> bool:
+    """True for a dated Azure api-version such as 2025-03-01-preview."""
+    version = (api_version or '').strip()
+    return len(version) >= 7 and version[:4].isdigit() and version[4] == '-'
+
+
+def resolve_azure_api_version(api_mode: str, api_version: str) -> str:
+    """Return the api-version to use, which only legacy mode actually sends.
+
+    Legacy mode needs a dated version; 'v1' there is a configuration mistake that
+    would fail every request, so substitute a working default instead.
+    """
+    if api_mode != AZURE_MODE_LEGACY:
+        return api_version
+    if is_dated_api_version(api_version):
+        return api_version
+    return FALLBACK_LEGACY_API_VERSION
+
+
+def supports_structured_outputs(api_mode: str, api_version: str) -> bool:
+    """Whether this Azure API surface accepts a json_schema response format."""
+    if api_mode != AZURE_MODE_LEGACY:
+        return True
+    version = (api_version or '').strip()
+    if not is_dated_api_version(version):
+        return False
+    return version[:10] >= STRUCTURED_OUTPUT_MIN_API_VERSION
+
 
 def normalize_azure_v1_base_url(endpoint: str) -> str:
     """Turn any Azure resource endpoint into a v1 base URL for the OpenAI client.
@@ -82,12 +120,10 @@ def build_azure_client(
         raise ValueError("Azure OpenAI endpoint is not configured")
 
     if api_mode == AZURE_MODE_LEGACY:
-        if not api_version:
-            raise ValueError("Azure legacy mode requires an api_version")
         return AzureOpenAI(
             api_key=api_key,
             azure_endpoint=str(endpoint).strip().rstrip('/'),
-            api_version=api_version,
+            api_version=resolve_azure_api_version(api_mode, api_version),
             timeout=timeout,
             max_retries=DEFAULT_MAX_RETRIES,
         )

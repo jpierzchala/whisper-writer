@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal, QMetaObject, QThread, QTimer
 from PyQt5.QtGui import QFont
+import sounddevice as sd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow, QT_WIDGETS_ARE_MOCKED
@@ -587,10 +588,12 @@ class SettingsWindow(BaseWindow):
                 if file_edit is not None:
                     ConfigManager.set_config_value(file_edit.text(), category, f"{key}_file_path")
             elif file_edit is not None:
+                # Empty means "not set", stored as null like every other str setting.
+                path = file_edit.text() or None
                 if sub_category:
-                    ConfigManager.set_config_value(file_edit.text(), category, sub_category, key)
+                    ConfigManager.set_config_value(path, category, sub_category, key)
                 else:
-                    ConfigManager.set_config_value(file_edit.text(), category, key)
+                    ConfigManager.set_config_value(path, category, key)
             return
 
         # Special handling for sound device combo box
@@ -899,32 +902,35 @@ class SettingsWindow(BaseWindow):
             self.toggle_api_local_options(use_api)
 
     def get_available_sound_devices(self):
-        """Get list of available sound devices that support recording."""
+        """List the input devices, from PortAudio metadata only.
+
+        Deliberately does not open a stream per device to probe it: that made
+        opening the settings window slow and could disturb devices already in use.
+        """
         try:
             devices = sd.query_devices()
-            input_devices = []
-            for i, device in enumerate(devices):
-                try:
-                    # Test if we can open an input stream with this device
-                    with sd.InputStream(device=i, channels=1, samplerate=16000, blocksize=1024):
-                        pass  # If we get here, the device works for recording
-                    
-                    if device['max_input_channels'] > 0:  # Only include input devices
-                        name = f"{i}: {device['name']}"
-                        input_devices.append({
-                            'index': i,
-                            'name': name,
-                            'channels': device['max_input_channels'],
-                            'default': device is sd.default.device[0]
-                        })
-                except sd.PortAudioError as e:
-                    # ConfigManager.console_print(f"Device {i}: {device['name']} not suitable for recording: {str(e)}")
-                    continue
-                
-            return input_devices
-        except Exception as e:
-            ConfigManager.console_print(f"Error getting sound devices: {str(e)}")
+        except Exception as exc:
+            ConfigManager.console_print(f"Could not enumerate sound devices: {exc}")
             return []
+
+        try:
+            default_index = sd.default.device[0]
+        except Exception:
+            default_index = None
+
+        input_devices = []
+        for index, device in enumerate(devices):
+            if device.get('max_input_channels', 0) <= 0:
+                continue
+            input_devices.append({
+                'index': index,
+                'name': f"{index}: {device['name']}",
+                'channels': device['max_input_channels'],
+                # Compare indices: `device` is a dict, so comparing it to the
+                # default index was always False and nothing was ever marked default.
+                'default': index == default_index,
+            })
+        return input_devices
 
     def toggle_llm_provider_options(self, provider=None):
         """Toggle visibility of LLM provider-specific options based on selected provider."""

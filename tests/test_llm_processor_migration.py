@@ -35,3 +35,48 @@ def test_legacy_api_type_from_config_is_also_aliased(patched_dependencies):
     processor = LLMProcessor()
     assert processor.api_type == 'openai'
 
+
+def test_a_legacy_api_type_still_reaches_the_provider(patched_dependencies, monkeypatch):
+    """The alias has to survive into process_text, which used to re-read the config.
+
+    Asserting only on processor.api_type let a regression through where the text
+    passed straight back out without any provider being called.
+    """
+    from llm_processor import ConfigManager, LLMProcessor
+
+    monkeypatch.setattr(
+        ConfigManager, 'get_config_value',
+        lambda *keys: 'gpt-5.6-luna' if keys[-1].endswith('_model') else None
+    )
+
+    called = {}
+
+    def fake_openai(self, text, system_message, model, mode):
+        called['model'] = model
+        return 'CLEANED'
+
+    monkeypatch.setattr(LLMProcessor, '_process_openai', fake_openai)
+
+    processor = LLMProcessor(api_type='chatgpt')
+    result = processor.process_text('surowy transkrypt', 'system msg', mode='cleanup')
+
+    assert called, "the openai provider should have been called for the 'chatgpt' alias"
+    assert result == 'CLEANED'
+
+
+def test_an_unknown_provider_is_reported_rather_than_silently_skipped(patched_dependencies, monkeypatch):
+    from llm_processor import ConfigManager, LLMProcessor
+
+    monkeypatch.setattr(ConfigManager, 'get_config_value', lambda *keys: None)
+    messages = []
+    monkeypatch.setattr(
+        ConfigManager, 'console_print',
+        lambda message, *args, **kwargs: messages.append(str(message))
+    )
+
+    processor = LLMProcessor(api_type='no-such-provider')
+    result = processor.process_text('surowy transkrypt', 'system msg', mode='cleanup')
+
+    assert result == 'surowy transkrypt'
+    assert any('Unknown LLM provider' in message for message in messages), messages
+

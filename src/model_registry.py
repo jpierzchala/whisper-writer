@@ -23,6 +23,12 @@ EFFORT_HIGH = 'high'
 EFFORT_XHIGH = 'xhigh'
 EFFORT_MAX = 'max'
 
+# Cheapest to most expensive, used to clamp a requested effort to what a model takes.
+EFFORT_ORDER = (
+    EFFORT_NONE, EFFORT_MINIMAL, EFFORT_LOW, EFFORT_MEDIUM,
+    EFFORT_HIGH, EFFORT_XHIGH, EFFORT_MAX,
+)
+
 API_RESPONSES = 'responses'
 API_CHAT = 'chat'
 
@@ -45,17 +51,26 @@ class LLMCapabilities:
         return bool(self.reasoning_efforts)
 
     def clamp_effort(self, effort):
-        """Return `effort` if this model accepts it, else the closest supported level."""
+        """Return `effort`, or the nearest supported level at or below it.
+
+        Never above what was asked, so latency cannot regress past the request;
+        but nearest rather than cheapest, because asking for 'max' on a model
+        without it means "think hard", and answering with 'none' would inverse
+        the request.
+        """
         if not self.reasoning_efforts:
             return None
         if effort in self.reasoning_efforts:
             return effort
-        # Fall back to the cheapest supported level so latency never regresses
-        # silently: a model that cannot skip thinking should think as little as possible.
-        for candidate in (EFFORT_NONE, EFFORT_MINIMAL, EFFORT_LOW, EFFORT_MEDIUM):
-            if candidate in self.reasoning_efforts:
-                return candidate
-        return self.reasoning_efforts[0]
+
+        supported = sorted(self.reasoning_efforts, key=EFFORT_ORDER.index)
+        if effort not in EFFORT_ORDER:
+            return supported[0]
+
+        target = EFFORT_ORDER.index(effort)
+        at_or_below = [level for level in supported if EFFORT_ORDER.index(level) < target]
+        # Nothing lower exists (e.g. 'none' on a model whose minimum is 'low').
+        return at_or_below[-1] if at_or_below else supported[0]
 
 
 # Reasoning-model families share everything except which efforts they accept.

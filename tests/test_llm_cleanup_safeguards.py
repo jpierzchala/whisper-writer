@@ -51,11 +51,13 @@ def test_reasoning_effort_comes_from_config_and_is_clamped_to_the_model():
         mock_config.get_config_value.side_effect = lambda *keys: 'high'
         assert processor._get_configured_effort('cleanup') == 'high'
 
-        # 'max' only exists on gpt-5.6; older families clamp down instead of 400ing.
+        # 'max' only exists on gpt-5.6; older families clamp down instead of 400ing,
+        # to the nearest level they do support rather than to the cheapest one.
         assert processor._resolve_reasoning_effort(resolve_llm_capabilities('gpt-5.6-luna'), 'cleanup') == 'high'
         mock_config.get_config_value.side_effect = lambda *keys: 'max'
         assert processor._resolve_reasoning_effort(resolve_llm_capabilities('gpt-5.6-luna'), 'cleanup') == 'max'
-        assert processor._resolve_reasoning_effort(resolve_llm_capabilities('gpt-5.2'), 'cleanup') == 'none'
+        assert processor._resolve_reasoning_effort(resolve_llm_capabilities('gpt-5.4'), 'cleanup') == 'xhigh'
+        assert processor._resolve_reasoning_effort(resolve_llm_capabilities('gpt-5.2'), 'cleanup') == 'high'
 
         # Non-reasoning models get no effort at all.
         assert processor._resolve_reasoning_effort(resolve_llm_capabilities('gpt-4o'), 'cleanup') is None
@@ -175,6 +177,85 @@ def test_effort_rejected_by_the_api_is_retried_once_with_a_supported_value():
         assert client.responses.create.call_count == 2
         assert client.responses.create.call_args_list[0].kwargs['reasoning'] == {'effort': 'none'}
         assert client.responses.create.call_args_list[1].kwargs['reasoning'] == {'effort': 'medium'}
+
+    sys.path.pop(0)
+
+
+def test_structured_output_flag_reflects_the_actual_reply_not_the_request():
+    """A model may ignore response_format; the rejection diagnostic must not lie."""
+    sys.path.insert(0, 'src')
+
+    with patch('llm_processor.ConfigManager') as mock_config, \
+         patch('llm_processor.KeyringManager') as mock_keyring, \
+         patch('llm_processor.build_openai_client') as mock_build_client:
+
+        mock_config.get_config_section.return_value = {
+            'api_type': 'openai', 'enabled': True, 'temperature': 0.3
+        }
+        mock_config.get_config_value.side_effect = lambda *keys: (
+            'gpt-5.6-luna' if keys[-1].endswith('_model') else None
+        )
+        mock_config.console_print = lambda *args, **kwargs: None
+        mock_config.should_log_cleanup_prompt.return_value = False
+        mock_keyring.get_api_key.return_value = 'test-key'
+
+        from llm_processor import LLMProcessor
+
+        client = MagicMock()
+        mock_build_client.return_value = client
+        processor = LLMProcessor(api_type='openai')
+
+        # Reply honours the JSON contract.
+        client.responses.create.return_value = _responses_result('{"cleaned_text": "gotowe"}')
+        assert processor.process_text('tekst', 'system', mode='cleanup') == 'gotowe'
+        assert processor.last_output_was_structured is True
+
+        # Reply ignores it and returns bare text, which is still usable.
+        client.responses.create.return_value = _responses_result('gotowe bez schematu')
+        assert processor.process_text('tekst', 'system', mode='cleanup') == 'gotowe bez schematu'
+        assert processor.last_output_was_structured is False
+
+    sys.path.pop(0)
+
+
+def test_legacy_azure_with_an_old_api_version_sends_no_json_schema():
+    """That api-version rejects a json_schema response format, failing the request."""
+    sys.path.insert(0, 'src')
+
+    with patch('llm_processor.ConfigManager') as mock_config, \
+         patch('llm_processor.KeyringManager') as mock_keyring, \
+         patch('llm_processor.build_azure_client') as mock_build_client:
+
+        mock_config.get_config_section.return_value = {
+            'api_type': 'azure_openai', 'enabled': True, 'temperature': 0.3
+        }
+        mock_config.get_config_value.side_effect = _azure_config_values({
+            ('llm_post_processing', 'azure_api_mode'): 'legacy',
+            ('llm_post_processing', 'azure_openai_llm_api_version'): '2024-02-01',
+            ('llm_post_processing', 'azure_openai_llm_cleanup_deployment_name'): 'gpt-4o-prod',
+            ('llm_post_processing', 'azure_openai_llm_cleanup_model_family'): 'chat',
+        })
+        mock_config.console_print = lambda *args, **kwargs: None
+        mock_config.should_log_cleanup_prompt.return_value = False
+        mock_keyring.get_api_key.return_value = 'test-key'
+
+        completion = MagicMock()
+        completion.output_text = None
+        completion.output = None
+        completion.choices = [MagicMock()]
+        completion.choices[0].message.refusal = None
+        completion.choices[0].message.content = 'wyczyszczony tekst'
+        client = MagicMock()
+        client.chat.completions.create.return_value = completion
+        mock_build_client.return_value = client
+
+        from llm_processor import LLMProcessor
+
+        processor = LLMProcessor(api_type='azure_openai')
+        assert processor.process_text('tekst', 'system', mode='cleanup') == 'wyczyszczony tekst'
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert 'response_format' not in kwargs
 
     sys.path.pop(0)
 

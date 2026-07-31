@@ -10,7 +10,12 @@ from model_registry import (
     EFFORT_NONE,
     resolve_llm_capabilities,
 )
-from openai_clients import build_azure_client, build_openai_client, resolve_azure_api_mode
+from openai_clients import (
+    build_azure_client,
+    build_openai_client,
+    resolve_azure_api_mode,
+    supports_structured_outputs,
+)
 
 # Optional third-party SDK imports; guard to avoid hard dependency in tests
 try:
@@ -76,6 +81,10 @@ DEFAULT_MODELS = {
 }
 
 class LLMProcessor:
+    # Set by _extract_text_from_sdk_response: did the last reply parse as the
+    # cleanup JSON contract, as opposed to a schema merely having been requested?
+    _last_reply_parsed_as_schema = False
+
     def __init__(self, api_type=None):
         """Initialize the LLM processor."""
         self.config = ConfigManager.get_config_section('llm_post_processing')
@@ -160,7 +169,10 @@ class LLMProcessor:
             else:
                 ConfigManager.console_print("Using default cleanup system message", verbose=True)
         
-        api_type = self.config['api_type']
+        # Use the normalised provider, not the raw config value: an explicitly
+        # passed api_type and legacy aliases are both resolved in __init__, and
+        # re-reading the config here would bypass them and match no branch below.
+        api_type = self.api_type
         mode = self._resolve_mode(system_message, mode)
 
         # Determine which model to use based on the resolved mode
@@ -208,6 +220,13 @@ class LLMProcessor:
             processed_text = self._process_ollama(request_text, system_message, model, mode)  # Pass the model explicitly
         elif api_type == 'groq':
             processed_text = self._process_groq(request_text, system_message, model, mode)
+        else:
+            # Without this the text would pass through untouched and unexplained.
+            ConfigManager.console_print(
+                f"Unknown LLM provider '{api_type}'; skipping post-processing. "
+                f"Set llm_post_processing.api_type to one of: "
+                f"openai, azure_openai, claude, gemini, groq, ollama."
+            )
 
         if mode == 'cleanup' and processed_text == request_text:
             return text
@@ -522,6 +541,7 @@ class LLMProcessor:
         mode: str,
         provider_label: str,
         family: str = AZURE_MODEL_FAMILY_AUTO,
+        allow_structured_outputs: bool = True,
     ) -> str:
         """Send one post-processing request through an OpenAI-compatible client.
 
@@ -534,7 +554,11 @@ class LLMProcessor:
         effort = self._resolve_reasoning_effort(capabilities, mode)
         temperature = self._get_temperature_for_mode(capability_model, mode, capabilities)
         max_tokens = self._max_output_tokens(text, capabilities)
-        wants_schema = mode == 'cleanup' and capabilities.supports_structured_outputs
+        wants_schema = (
+            mode == 'cleanup'
+            and capabilities.supports_structured_outputs
+            and allow_structured_outputs
+        )
 
         self._safe_console_print(
             f"{provider_label}: model={request_model} api={capabilities.api} "
@@ -588,7 +612,10 @@ class LLMProcessor:
             response, cleanup_mode=(mode == 'cleanup'), require_schema=wants_schema
         )
         if processed:
-            self.last_output_was_structured = wants_schema
+            # Record whether the reply actually came back through the contract, not
+            # merely that one was requested: a model can ignore response_format, and
+            # the rejection diagnostic would otherwise misreport why cleanup failed.
+            self.last_output_was_structured = wants_schema and self._last_reply_parsed_as_schema
             self._safe_console_print(f"{provider_label} returned {len(processed)} characters", verbose=True)
             return processed
 
@@ -607,6 +634,8 @@ class LLMProcessor:
         contract. Returning the raw body instead would paste the JSON envelope
         into the user's document.
         """
+        cls._last_reply_parsed_as_schema = False
+
         if response is None:
             return None
 
@@ -643,6 +672,7 @@ class LLMProcessor:
         if cleanup_mode:
             parsed = cls._extract_cleanup_text_from_payload(collected)
             if parsed:
+                cls._last_reply_parsed_as_schema = True
                 return parsed
             # A reply that is JSON but not the agreed shape must never be pasted:
             # the user would get the envelope instead of their text. A reply that is
@@ -963,6 +993,8 @@ class LLMProcessor:
             mode=mode,
             provider_label="Azure OpenAI",
             family=self._get_azure_model_family(mode),
+            # Old dated api-versions reject a json_schema response format outright.
+            allow_structured_outputs=supports_structured_outputs(api_mode, api_version),
         )
 
     def _get_azure_deployment_name(self, mode: str) -> str | None:

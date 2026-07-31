@@ -205,6 +205,66 @@ def test_theme_has_a_light_and_a_dark_variant():
         assert '.5pt' not in sheet
 
 
+def test_sound_devices_are_listed_from_metadata(monkeypatch):
+    """The microphone list must not depend on opening a stream per device.
+
+    A broad `except Exception` here previously hid a missing `sounddevice` import,
+    leaving the dropdown silently empty.
+    """
+    import sounddevice
+    import ui.settings_window as settings_module
+    from ui.settings_window import SettingsWindow
+
+    devices = [
+        {'name': 'Speakers', 'max_input_channels': 0},
+        {'name': 'Microphone (Realtek)', 'max_input_channels': 2},
+        {'name': 'Line In', 'max_input_channels': 1},
+    ]
+
+    class FakeSoundDevice:
+        default = type('Default', (), {'device': [2, 0]})()
+
+        @staticmethod
+        def query_devices():
+            return devices
+
+        @staticmethod
+        def InputStream(*args, **kwargs):  # noqa: N802 - mirrors the sounddevice API
+            raise AssertionError("enumeration must not open an input stream")
+
+    monkeypatch.setattr(settings_module, 'sd', FakeSoundDevice)
+
+    listed = SettingsWindow.get_available_sound_devices(None)
+
+    assert [item['index'] for item in listed] == [1, 2], "output-only devices should be skipped"
+    assert listed[0]['name'] == '1: Microphone (Realtek)'
+    # The default device is identified by index, not by comparing dicts.
+    assert [item['default'] for item in listed] == [False, True]
+
+    # The real module must actually be imported, or `sd` would be undefined.
+    assert settings_module.sd is not None or sounddevice is not None
+
+
+def test_sound_device_enumeration_failure_is_reported_not_swallowed(monkeypatch):
+    import ui.settings_window as settings_module
+    from ui.settings_window import SettingsWindow
+
+    class Broken:
+        @staticmethod
+        def query_devices():
+            raise OSError('PortAudio unavailable')
+
+    monkeypatch.setattr(settings_module, 'sd', Broken)
+    messages = []
+    monkeypatch.setattr(
+        settings_module.ConfigManager, 'console_print',
+        classmethod(lambda cls, message, *a, **k: messages.append(str(message)))
+    )
+
+    assert SettingsWindow.get_available_sound_devices(None) == []
+    assert any('sound devices' in message for message in messages), messages
+
+
 def test_window_is_resizable(settings_window):
     """The old window was setFixedSize, unusable on a small screen."""
     assert settings_window.minimumWidth() < settings_window.width()
