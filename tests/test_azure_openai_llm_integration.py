@@ -72,83 +72,69 @@ def test_azure_openai_llm_processor_import():
         assert processor.api_type == 'azure_openai'
 
 def test_azure_openai_llm_api_call_structure():
-    """Test that Azure OpenAI LLM makes correctly structured API calls."""
-    
+    """A v1-mode Azure deployment reaches the OpenAI-compatible client."""
+
     sys.path.insert(0, 'src')
-    
+
     with patch('llm_processor.ConfigManager') as mock_config, \
          patch('llm_processor.KeyringManager') as mock_keyring, \
-         patch('llm_processor.requests.post') as mock_requests:
-        
+         patch('openai_clients.OpenAI') as mock_openai:
+
         # Mock configuration
         mock_config.get_config_section.return_value = {
             'api_type': 'azure_openai',
             'enabled': True,
             'temperature': 0.3
         }
-        
+
         def mock_get_config_value(section, key):
             config_map = {
                 ('llm_post_processing', 'azure_openai_llm_endpoint'): 'https://test.openai.azure.com',
-                ('llm_post_processing', 'azure_openai_llm_api_version'): '2024-02-01',
-                ('llm_post_processing', 'azure_openai_llm_deployment_name'): 'gpt-4o-deployment',
+                ('llm_post_processing', 'azure_api_mode'): 'v1',
+                ('llm_post_processing', 'azure_openai_llm_cleanup_deployment_name'): 'gpt-4o-deployment',
+                ('llm_post_processing', 'azure_openai_llm_cleanup_model_family'): 'chat',
                 ('llm_post_processing', 'cleanup_model'): 'gpt-4o-mini'
             }
             return config_map.get((section, key))
-        
+
         mock_config.get_config_value.side_effect = mock_get_config_value
+        mock_config.should_log_cleanup_prompt.return_value = False
         mock_config.console_print = lambda *args, **kwargs: None
         
         # Mock keyring
         mock_keyring.get_api_key.return_value = "test-azure-llm-key"
         
-        # Mock successful API response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'choices': [{
-                'message': {
-                    'content': 'Processed text'
-                }
-            }]
-        }
-        mock_requests.return_value = mock_response
-        
+        completion = MagicMock()
+        completion.output_text = None
+        completion.output = None
+        completion.choices = [MagicMock()]
+        completion.choices[0].message.refusal = None
+        completion.choices[0].message.content = 'Processed text'
+        mock_openai.return_value.chat.completions.create.return_value = completion
+
         from llm_processor import LLMProcessor
-        
+
         processor = LLMProcessor(api_type='azure_openai')
-        
-        # Test the process_text method
+
         result = processor.process_text("test text", "system message")
-        
-        # Verify API was called
-        assert mock_requests.called
-        call_args = mock_requests.call_args
-        
-        # Verify URL structure
-        url = call_args[0][0]
-        assert 'test.openai.azure.com' in url
-        assert 'gpt-4o-deployment' in url
-        assert 'chat/completions' in url
-        assert 'api-version=2024-02-01' in url
-        
-        # Verify headers
-        headers = call_args[1]['headers']
-        assert headers['api-key'] == 'test-azure-llm-key'
-        assert headers['Content-Type'] == 'application/json'
-        
-        # Verify request body structure
-        request_data = call_args[1]['json']
-        assert 'messages' in request_data
-        assert len(request_data['messages']) == 2
-        assert request_data['messages'][0]['role'] == 'system'
-        assert request_data['messages'][1]['role'] == 'user'
-        assert '<transcript>' in request_data['messages'][1]['content']
-        assert 'test text' in request_data['messages'][1]['content']
-        assert request_data['temperature'] == 0.0
-        
-        # Verify result
         assert result == 'Processed text'
+
+        # v1 mode points a plain OpenAI client at the resource's /openai/v1/ base URL.
+        mock_openai.assert_called_once()
+        client_kwargs = mock_openai.call_args.kwargs
+        assert client_kwargs['base_url'] == 'https://test.openai.azure.com/openai/v1/'
+        assert client_kwargs['api_key'] == 'test-azure-llm-key'
+
+        create = mock_openai.return_value.chat.completions.create
+        assert create.called
+        kwargs = create.call_args.kwargs
+        assert kwargs['model'] == 'gpt-4o-deployment'
+        assert len(kwargs['messages']) == 2
+        assert kwargs['messages'][0]['role'] == 'system'
+        assert kwargs['messages'][1]['role'] == 'user'
+        assert '<transcript>' in kwargs['messages'][1]['content']
+        assert 'test text' in kwargs['messages'][1]['content']
+        assert kwargs['temperature'] == 0.0
 
 def test_azure_openai_llm_missing_config_handling():
     """Test handling of missing Azure OpenAI LLM configuration."""

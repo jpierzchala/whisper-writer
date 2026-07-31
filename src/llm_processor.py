@@ -1,11 +1,16 @@
-import os
-import copy
 import json
 import re
 import requests
 from utils import ConfigManager
 from keyring_manager import KeyringManager
-import importlib
+from model_registry import (
+    API_RESPONSES,
+    AZURE_MODEL_FAMILY_AUTO,
+    EFFORT_LOW,
+    EFFORT_NONE,
+    resolve_llm_capabilities,
+)
+from openai_clients import build_azure_client, build_openai_client, resolve_azure_api_mode
 
 # Optional third-party SDK imports; guard to avoid hard dependency in tests
 try:
@@ -22,19 +27,53 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     Groq = None
 
+try:
+    from openai import BadRequestError
+except Exception:  # pragma: no cover - optional dependency
+    BadRequestError = None
+
 # Check if Ollama is available
 HAS_OLLAMA = ollama is not None
-RESPONSES_API_ENDPOINT = "https://api.openai.com/v1/responses"
 CLAUDE_API_ENDPOINT = "https://api.anthropic.com/v1/messages"
-# (connect, read) timeouts for LLM HTTP calls. Post-processing sits on the interactive
-# path, so a hung request must fail rather than block the dictation pipeline forever.
+# (connect, read) timeouts for LLM HTTP calls made without the OpenAI SDK.
+# Post-processing sits on the interactive path, so a hung request must fail
+# rather than block the dictation pipeline forever.
 REQUEST_TIMEOUT = (10, 60)
-REASONING_MODEL_PREFIXES = ("gpt-5", "o1")
-RESPONSES_MODEL_PREFIXES = ("gpt-5",)
-GPT53_CHAT_PREFIXES = ("gpt-5.3-chat",)
+SDK_TIMEOUT = 60.0
 CLEANUP_RESPONSE_SCHEMA_NAME = "cleaned_transcript_schema"
 CLEANUP_RESPONSE_JSON_FIELD = "cleaned_text"
-LEGACY_CLEANUP_RESPONSE_JSON_FIELD = "processed_and_cleaned_transcript"
+
+# Output-token budget. Cleanup returns roughly its input, so the budget scales with
+# the input instead of the old fixed 1024, which truncated long dictations.
+MIN_OUTPUT_TOKENS = 1024
+MAX_OUTPUT_TOKENS = 16384
+# Reasoning models also spend this budget on hidden thinking tokens.
+REASONING_TOKEN_HEADROOM = 2048
+
+# Default reasoning effort per mode when the config does not pin one. Cleanup is a
+# mechanical edit and sits on the interactive path, so it skips thinking entirely;
+# instruction mode may need to actually reason about what was asked.
+DEFAULT_EFFORT_BY_MODE = {
+    'cleanup': EFFORT_NONE,
+    'instruction': EFFORT_LOW,
+}
+
+LEGACY_API_TYPE_ALIASES = {'chatgpt': 'openai'}
+
+# Last-resort model per provider when nothing is configured. gpt-5.6-luna is the
+# fast tier of the current OpenAI family: it is the latency and cost choice for
+# transcript cleanup and is available on both OpenAI and Azure.
+DEFAULT_MODELS = {
+    'claude': 'claude-haiku-4-5',
+    'openai': 'gpt-5.6-luna',
+    'azure_openai': 'gpt-5.6-luna',
+    'gemini': 'gemini-2.5-flash',
+    'groq': 'llama-3.3-70b-versatile',
+    'ollama': {
+        'cleanup': 'airat/karen-the-editor-v2-strict',
+        'instruction': 'llama3.2',
+    },
+}
 
 class LLMProcessor:
     def __init__(self, api_type=None):
@@ -56,6 +95,8 @@ class LLMProcessor:
         self._safe_console_print = _safe_print
         
         self.api_key = None
+        # Set when the last reply came back through the validated cleanup JSON schema.
+        self.last_output_was_structured = False
         # If api_type is passed, use it; otherwise get from config without assuming a default
         if api_type is None:
             self.api_type = self.config.get('api_type')
@@ -65,14 +106,9 @@ class LLMProcessor:
         else:
             self.api_type = api_type
 
-        if self.api_type == 'chatgpt':
-            ConfigManager.console_print("Deprecated api_type 'chatgpt' detected, treating as 'openai'")
-            self.api_type = 'openai'
-            try:
-                ConfigManager.set_config_value('openai', 'llm_post_processing', 'api_type')
-            except Exception:
-                pass
-        
+        # Old configs may still name a provider that has since been renamed.
+        self.api_type = LEGACY_API_TYPE_ALIASES.get(self.api_type, self.api_type)
+
         ConfigManager.console_print(f"Initializing LLM Processor with API type: {self.api_type}")
         
         # Get API key based on API type
@@ -105,6 +141,8 @@ class LLMProcessor:
             text: The text to process
             mode: Optional explicit processing mode (cleanup or instruction)
         """
+        self.last_output_was_structured = False
+
         if not text:
             return text
 
@@ -133,24 +171,11 @@ class LLMProcessor:
             model = ConfigManager.get_config_value('llm_post_processing', 'cleanup_model')
             ConfigManager.console_print("Using cleanup mode")
         
-        # Default models if none specified
-        default_models = {
-            'claude': 'claude-3-5-sonnet-latest',
-            'openai': 'gpt-4o-mini',
-            'azure_openai': 'gpt-4o-mini',
-            'gemini': 'gemini-1.5-flash',
-            'groq': 'llama-3.1-8b-instant',
-            'ollama': {
-                'cleanup': 'airat/karen-the-editor-v2-strict',
-                'instruction': 'llama3.2'
-            }
-        }
-        
         if not model:
             if api_type == 'ollama':
-                model = default_models['ollama'][mode]
+                model = DEFAULT_MODELS['ollama'][mode]
             else:
-                model = default_models.get(api_type)
+                model = DEFAULT_MODELS.get(api_type)
             ConfigManager.console_print(f"No model specified, using default {mode} model for {api_type}: {model}")
 
         request_text = self._prepare_text_input(text, mode)
@@ -212,78 +237,84 @@ class LLMProcessor:
             "</transcript>"
         )
 
-    def _get_temperature_for_mode(self, model: str, mode: str) -> float | None:
-        if self._model_requires_reasoning_controls(model):
+    def _get_temperature_for_mode(self, model: str, mode: str, capabilities=None) -> float | None:
+        """Return the temperature to send, or None when the model rejects one."""
+        capabilities = capabilities or resolve_llm_capabilities(model)
+        if not capabilities.supports_temperature:
             return None
         if mode == 'cleanup':
+            # Cleanup is an edit, not a generation: any sampling is a regression.
             return 0.0
         return self.config.get('temperature', 0.3)
 
-    @staticmethod
-    def _get_preferred_reasoning_effort(model: str) -> str:
-        lowered = (model or '').strip().lower()
-        if any(lowered.startswith(prefix) for prefix in GPT53_CHAT_PREFIXES):
-            return 'medium'
-        return 'none'
+    def _get_configured_effort(self, mode: str) -> str:
+        """Reasoning effort for this mode, from config, falling back to the mode default."""
+        setting = 'instruction_reasoning_effort' if mode == 'instruction' else 'cleanup_reasoning_effort'
+        configured = ConfigManager.get_config_value('llm_post_processing', setting)
+        if configured:
+            return str(configured).strip().lower()
+        return DEFAULT_EFFORT_BY_MODE.get(mode, EFFORT_NONE)
 
-    @classmethod
-    def _build_reasoning_config(cls, model: str) -> dict | None:
-        if not cls._model_requires_reasoning_controls(model):
+    def _resolve_reasoning_effort(self, capabilities, mode: str) -> str | None:
+        """Effort to send for this model/mode, clamped to what the model accepts.
+
+        GPT-5.6 defaults to 'medium' server-side, so the effort is always sent
+        explicitly: omitting it would silently add thinking latency to every
+        dictation.
+        """
+        if not capabilities.is_reasoning_model:
             return None
-        return {"effort": cls._get_preferred_reasoning_effort(model)}
+        return capabilities.clamp_effort(self._get_configured_effort(mode))
 
     @staticmethod
-    def _extract_supported_reasoning_efforts(response) -> list[str]:
+    def _max_output_tokens(text: str, capabilities=None) -> int:
+        """Scale the output budget with the input so long dictations are not truncated."""
+        # Roughly 3 characters per token for Polish text with diacritics.
+        estimated_input_tokens = max(1, len(text or '') // 3)
+        budget = estimated_input_tokens * 2
+        if capabilities is not None and capabilities.is_reasoning_model:
+            # Hidden reasoning tokens are drawn from the same budget as the answer.
+            budget += REASONING_TOKEN_HEADROOM
+        return max(MIN_OUTPUT_TOKENS, min(budget, MAX_OUTPUT_TOKENS))
+
+    @staticmethod
+    def _supported_efforts_from_error(error, effort: str) -> list[str]:
+        """Pull the accepted effort values out of a rejected-effort API error.
+
+        Guarded so an unrelated 400 that happens to list supported values (for a
+        different parameter) does not trigger an effort retry.
+        """
+        message = str(getattr(error, 'message', None) or error or '')
+        mentions_effort = 'effort' in message or 'reasoning' in message or f"'{effort}'" in message
+        if not mentions_effort:
+            return []
+        supported = re.search(r"Supported values are:\s*(.+?)(?:\.|$)", message)
+        if not supported:
+            return []
+        return re.findall(r"'([^']+)'", supported.group(1))
+
+    def _call_with_effort_fallback(self, send, effort, provider_label: str):
+        """Invoke `send(effort)`, retrying once if the API rejects that effort level.
+
+        The capability registry should already prevent this, so a retry here means
+        the registry is behind the API; it is a safety net, not the mechanism.
+        """
         try:
-            response_data = response.json()
-        except Exception:
-            return []
-
-        error = response_data.get('error') if isinstance(response_data, dict) else None
-        if not isinstance(error, dict):
-            return []
-        if error.get('param') != 'reasoning.effort':
-            return []
-
-        message = error.get('message') or ''
-        supported_values_match = re.search(r"Supported values are:\s*(.+?)(?:\.|$)", message)
-        if not supported_values_match:
-            return []
-
-        matches = re.findall(r"'([^']+)'", supported_values_match.group(1))
-        if not matches:
-            return []
-        return matches
-
-    def _post_with_reasoning_effort_fallback(self, url: str, headers: dict, payload: dict, timeout: int | None = None, provider_label: str = "Responses API"):
-        request_kwargs = {
-            'headers': headers,
-            'json': payload
-        }
-        if timeout is not None:
-            request_kwargs['timeout'] = timeout
-
-        response = requests.post(url, **request_kwargs)
-        supported_efforts = self._extract_supported_reasoning_efforts(response)
-        current_effort = (payload.get('reasoning') or {}).get('effort')
-
-        if response.status_code == 400 and supported_efforts and current_effort is not None:
-            retry_effort = next((effort for effort in supported_efforts if effort != current_effort), None)
-            if retry_effort:
-                retry_payload = copy.deepcopy(payload)
-                retry_payload.setdefault('reasoning', {})['effort'] = retry_effort
-                ConfigManager.console_print(
-                    f"{provider_label} rejected reasoning.effort='{current_effort}'; retrying once with '{retry_effort}'."
-                )
-                retry_kwargs = {
-                    'headers': headers,
-                    'json': retry_payload
-                }
-                if timeout is not None:
-                    retry_kwargs['timeout'] = timeout
-                return requests.post(url, **retry_kwargs)
-
-        return response
+            return send(effort)
+        except Exception as exc:
+            if BadRequestError is None or not isinstance(exc, BadRequestError) or effort is None:
+                raise
+            alternatives = [
+                value for value in self._supported_efforts_from_error(exc, effort)
+                if value != effort
+            ]
+            if not alternatives:
+                raise
+            ConfigManager.console_print(
+                f"{provider_label} rejected reasoning effort '{effort}'; "
+                f"retrying once with '{alternatives[0]}'."
+            )
+            return send(alternatives[0])
 
     @staticmethod
     def _cleanup_response_schema() -> dict:
@@ -331,10 +362,9 @@ class LLMProcessor:
         if not isinstance(parsed, dict):
             return None
 
-        for key in (CLEANUP_RESPONSE_JSON_FIELD, LEGACY_CLEANUP_RESPONSE_JSON_FIELD):
-            value = parsed.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        value = parsed.get(CLEANUP_RESPONSE_JSON_FIELD)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         return None
 
     @staticmethod
@@ -465,134 +495,189 @@ class LLMProcessor:
     def _process_openai(self, text: str, system_message: str, model: str, mode: str) -> str:
         api_key = KeyringManager.get_api_key("openai_llm")
         ConfigManager.console_print(f"Using OpenAI API key: {'[SET]' if api_key else '[NOT SET]'}")
-        
-        if self._should_use_responses_api(model):
-            reasoning_config = self._build_reasoning_config(model)
-            if reasoning_config:
-                self._safe_console_print(
-                    f"Routing model {model} through the Responses API with reasoning effort '{reasoning_config['effort']}'"
-                )
-            else:
-                self._safe_console_print(f"Routing model {model} through the Responses API")
-            return self._process_openai_responses(text, system_message, model, api_key, mode)
-        
-        headers = {
-            'Authorization': f'Bearer {api_key}',
-            'Content-Type': 'application/json'
-        }
-        
-        data = {
-            'model': model,
-            'messages': [
-                {'role': 'system', 'content': system_message},
-                {'role': 'user', 'content': text}
-            ]
-        }
 
-        temperature = self._get_temperature_for_mode(model, mode)
-        if temperature is not None:
-            data['temperature'] = temperature
-
-        if mode == 'cleanup':
-            data['response_format'] = self._cleanup_chat_response_format()
-        
         try:
-            response = requests.post(
-                'https://api.openai.com/v1/chat/completions',
-                headers=headers,
-                json=data,
-                timeout=REQUEST_TIMEOUT
-            )
-            
-            ConfigManager.console_print(f"OpenAI API response status: {response.status_code}", verbose=True)
-            
-            if response.status_code == 200:
-                response_data = response.json()
-                if 'choices' in response_data and len(response_data['choices']) > 0:
-                    processed_text = response_data['choices'][0]['message']['content']
-                    if mode == 'cleanup' and isinstance(processed_text, str):
-                        cleaned = self._extract_cleanup_text_from_payload(processed_text)
-                        if cleaned:
-                            ConfigManager.console_print("OpenAI API request successful (structured output)", verbose=True)
-                            return cleaned
-                    ConfigManager.console_print(f"Processed text from OpenAI API: {processed_text}", verbose=True)
-                    return processed_text
-                
-                ConfigManager.console_print(f"Unexpected OpenAI API response structure: {response_data}", verbose=True)
-            else:
-                ConfigManager.console_print(f"OpenAI API error: {response.status_code} - {response.text}")
-            
-        except Exception as e:
-            ConfigManager.console_print(f"Error in OpenAI API call: {str(e)}")
-        
-        return text
-
-    def _should_use_responses_api(self, model: str) -> bool:
-        """Return True when the OpenAI Responses API should be used for this model."""
-        if not model:
-            return False
-        lowered = model.lower()
-        return any(lowered.startswith(prefix) for prefix in RESPONSES_MODEL_PREFIXES)
-
-    @staticmethod
-    def _model_requires_reasoning_controls(model: str) -> bool:
-        if not model:
-            return False
-        lowered = model.lower()
-        return any(lowered.startswith(prefix) for prefix in REASONING_MODEL_PREFIXES)
-
-    def _process_openai_responses(self, text: str, system_message: str, model: str, api_key: str, mode: str) -> str:
-        """Invoke the OpenAI Responses API for GPT-5.1-class models."""
-        if not api_key:
-            ConfigManager.console_print("OpenAI API key not found for Responses API request")
+            client = build_openai_client(api_key, timeout=SDK_TIMEOUT)
+        except ValueError as exc:
+            ConfigManager.console_print(f"Cannot call the OpenAI API: {exc}")
             return text
 
-        headers = {
-            'Authorization': f'Bearer {api_key}',
-            'Content-Type': 'application/json'
-        }
+        return self._run_openai_compatible(
+            client,
+            text,
+            system_message,
+            request_model=model,
+            capability_model=model,
+            mode=mode,
+            provider_label="OpenAI",
+        )
 
-        payload = {
-            "model": model,
-            "instructions": system_message,
-            "input": text,
-            "max_output_tokens": 1024,
-        }
+    def _run_openai_compatible(
+        self,
+        client,
+        text: str,
+        system_message: str,
+        request_model: str,
+        capability_model: str,
+        mode: str,
+        provider_label: str,
+        family: str = AZURE_MODEL_FAMILY_AUTO,
+    ) -> str:
+        """Send one post-processing request through an OpenAI-compatible client.
 
-        reasoning_config = self._build_reasoning_config(model)
-        if reasoning_config:
-            payload["reasoning"] = reasoning_config
+        `request_model` is what goes on the wire (a deployment name on Azure);
+        `capability_model` is what the capability registry is asked about.
+        Returns the original text unchanged on any failure, so a broken LLM never
+        costs the user their dictation.
+        """
+        capabilities = resolve_llm_capabilities(capability_model, family)
+        effort = self._resolve_reasoning_effort(capabilities, mode)
+        temperature = self._get_temperature_for_mode(capability_model, mode, capabilities)
+        max_tokens = self._max_output_tokens(text, capabilities)
+        wants_schema = mode == 'cleanup' and capabilities.supports_structured_outputs
 
-        temperature = self._get_temperature_for_mode(model, mode)
-        if temperature is not None:
-            payload["temperature"] = temperature
+        self._safe_console_print(
+            f"{provider_label}: model={request_model} api={capabilities.api} "
+            f"effort={effort or 'n/a'} temperature={temperature if temperature is not None else 'n/a'} "
+            f"max_output_tokens={max_tokens}"
+        )
 
-        if mode == 'cleanup':
-            payload["text"] = self._cleanup_response_text_format()
+        if capabilities.api == API_RESPONSES:
+            def send(current_effort):
+                kwargs = {
+                    'model': request_model,
+                    'instructions': system_message,
+                    'input': text,
+                    'max_output_tokens': max_tokens,
+                }
+                if current_effort:
+                    kwargs['reasoning'] = {'effort': current_effort}
+                if temperature is not None:
+                    kwargs['temperature'] = temperature
+                if wants_schema:
+                    kwargs['text'] = self._cleanup_response_text_format()
+                elif capabilities.supports_verbosity:
+                    # Shorter answers finish sooner; cleanup never wants prose around the text.
+                    kwargs['text'] = {'verbosity': 'low'}
+                return client.responses.create(**kwargs)
+        else:
+            def send(current_effort):
+                kwargs = {
+                    'model': request_model,
+                    'messages': [
+                        {'role': 'system', 'content': system_message},
+                        {'role': 'user', 'content': text},
+                    ],
+                    capabilities.max_tokens_param: max_tokens,
+                }
+                if current_effort:
+                    kwargs['reasoning_effort'] = current_effort
+                if temperature is not None:
+                    kwargs['temperature'] = temperature
+                if wants_schema:
+                    kwargs['response_format'] = self._cleanup_chat_response_format()
+                return client.chat.completions.create(**kwargs)
 
         try:
-            response = self._post_with_reasoning_effort_fallback(
-                RESPONSES_API_ENDPOINT,
-                headers=headers,
-                payload=payload,
-                timeout=60,
-                provider_label="OpenAI Responses API"
-            )
-            self._safe_console_print(f"Responses API status code: {response.status_code}", verbose=True)
-
-            if response.status_code == 200:
-                response_data = response.json()
-                processed_text = self._extract_text_from_responses_output(response_data, cleanup_mode=(mode == 'cleanup'))
-                if processed_text:
-                    self._safe_console_print(f"Processed text from {model} via Responses API", verbose=True)
-                    return processed_text
-                self._safe_console_print(f"Unexpected Responses API payload: {response_data}", verbose=True)
-            else:
-                ConfigManager.console_print(f"Responses API error ({model}): {response.status_code} - {response.text}")
+            response = self._call_with_effort_fallback(send, effort, provider_label)
         except Exception as exc:
-            ConfigManager.console_print(f"Error calling Responses API for model {model}: {exc}")
+            ConfigManager.console_print(f"{provider_label} request failed ({request_model}): {exc}")
+            return text
 
+        processed = self._extract_text_from_sdk_response(
+            response, cleanup_mode=(mode == 'cleanup'), require_schema=wants_schema
+        )
+        if processed:
+            self.last_output_was_structured = wants_schema
+            self._safe_console_print(f"{provider_label} returned {len(processed)} characters", verbose=True)
+            return processed
+
+        ConfigManager.console_print(
+            f"{provider_label} returned no usable text for {request_model}; keeping the original."
+        )
         return text
+
+    @classmethod
+    def _extract_text_from_sdk_response(
+        cls, response, cleanup_mode: bool = False, require_schema: bool = False
+    ) -> str | None:
+        """Pull the answer text out of a Responses or Chat Completions object.
+
+        When `require_schema` is set the reply must parse as the cleanup JSON
+        contract. Returning the raw body instead would paste the JSON envelope
+        into the user's document.
+        """
+        if response is None:
+            return None
+
+        collected = None
+
+        # Responses API: prefer the SDK's flattened output_text helper.
+        output_text = getattr(response, 'output_text', None)
+        if isinstance(output_text, str) and output_text.strip():
+            collected = output_text.strip()
+
+        if collected is None and getattr(response, 'output', None) is not None:
+            # A refusal must not be pasted into the user's document.
+            payload = cls._response_to_dict(response)
+            if cls._extract_refusal_from_responses_output(payload):
+                return None
+            collected = cls._extract_text_from_responses_output(payload, cleanup_mode=False)
+
+        if collected is None:
+            choices = getattr(response, 'choices', None) or []
+            for choice in choices:
+                message = getattr(choice, 'message', None)
+                if message is None:
+                    continue
+                if getattr(message, 'refusal', None):
+                    return None
+                content = getattr(message, 'content', None)
+                if isinstance(content, str) and content.strip():
+                    collected = content.strip()
+                    break
+
+        if not collected:
+            return None
+
+        if cleanup_mode:
+            parsed = cls._extract_cleanup_text_from_payload(collected)
+            if parsed:
+                return parsed
+            # A reply that is JSON but not the agreed shape must never be pasted:
+            # the user would get the envelope instead of their text. A reply that is
+            # not JSON at all is a model that ignored response_format, and its plain
+            # text is still usable.
+            if require_schema and cls._looks_like_json_object(collected):
+                ConfigManager.console_print(
+                    "Cleanup reply was JSON but not the expected shape; keeping the original text."
+                )
+                return None
+        return collected
+
+    @staticmethod
+    def _looks_like_json_object(value: str) -> bool:
+        candidate = (value or '').strip()
+        if not (candidate.startswith('{') and candidate.endswith('}')):
+            return False
+        try:
+            return isinstance(json.loads(candidate), dict)
+        except json.JSONDecodeError:
+            return False
+
+    @staticmethod
+    def _response_to_dict(response) -> dict:
+        """Best-effort conversion of an SDK model object to a plain dict."""
+        for method in ('model_dump', 'to_dict', 'dict'):
+            converter = getattr(response, method, None)
+            if callable(converter):
+                try:
+                    payload = converter()
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    return payload
+        return {}
 
     @staticmethod
     def _extract_text_from_responses_output(response_data: dict, cleanup_mode: bool = False) -> str | None:
@@ -841,151 +926,49 @@ class LLMProcessor:
             ConfigManager.console_print("Azure OpenAI LLM API key not found in keyring")
             return text
         
-        # Get Azure OpenAI specific configuration for LLM
         endpoint = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_endpoint')
         api_version = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_api_version')
+        configured_mode = ConfigManager.get_config_value('llm_post_processing', 'azure_api_mode')
         deployment_name = self._get_azure_deployment_name(mode)
-        
-        if not endpoint:
-            ConfigManager.console_print("Azure OpenAI LLM endpoint not configured")
-            return text
-        
+
         if not deployment_name:
             ConfigManager.console_print("Azure OpenAI LLM deployment name not configured")
             return text
-        ConfigManager.console_print(f"Using Azure OpenAI LLM deployment: {deployment_name}")
-        effective_model = deployment_name or model
-        headers = {
-            'api-key': api_key,
-            'Content-Type': 'application/json'
-        }
-        supports_structured_outputs = self._azure_supports_structured_outputs(api_version)
 
-        if self._model_requires_reasoning_controls(effective_model):
-            return self._process_azure_openai_responses(
-                text,
-                system_message,
-                effective_model,
-                headers,
+        api_mode = resolve_azure_api_mode(configured_mode, api_version)
+        ConfigManager.console_print(
+            f"Using Azure OpenAI LLM deployment {deployment_name} ({api_mode} API)"
+        )
+
+        try:
+            client = build_azure_client(
+                api_key,
                 endpoint,
-                api_version,
-                deployment_name,
-                supports_structured_outputs,
-                mode
+                api_mode=api_mode,
+                api_version=api_version,
+                timeout=SDK_TIMEOUT,
             )
-        
-        base_url = f"{endpoint}/openai/deployments/{deployment_name}/chat/completions?api-version={api_version}"
-        ConfigManager.console_print(f"Using Azure OpenAI LLM endpoint: {base_url}")
-        
-        data = {
-            'messages': [
-                {'role': 'system', 'content': system_message},
-                {'role': 'user', 'content': text}
-            ]
-        }
+        except ValueError as exc:
+            ConfigManager.console_print(f"Cannot call Azure OpenAI: {exc}")
+            return text
 
-        if supports_structured_outputs and mode == 'cleanup':
-            data["response_format"] = self._cleanup_chat_response_format()
-
-        temperature = self._get_temperature_for_mode(effective_model, mode)
-        if temperature is not None:
-            data['temperature'] = temperature
-        
-        try:
-            ConfigManager.console_print(f"Sending request to Azure OpenAI LLM API using deployment {deployment_name}...")
-            
-            response = requests.post(
-                base_url,
-                headers=headers,
-                json=data,
-                timeout=REQUEST_TIMEOUT
-            )
-
-            self._safe_console_print(f"Azure OpenAI LLM API response status: {response.status_code}", verbose=True)
-            
-            if response.status_code == 200:
-                response_data = response.json()
-                if 'choices' in response_data and len(response_data['choices']) > 0:
-                    message = response_data['choices'][0].get('message', {})
-                    content = message.get('content', '')
-
-                    if supports_structured_outputs and mode == 'cleanup' and isinstance(content, str):
-                        cleaned = self._extract_cleanup_text_from_payload(content)
-                        if cleaned:
-                            self._safe_console_print("Azure OpenAI LLM API request successful (structured output)")
-                            return cleaned
-
-                    processed_text = content
-                    self._safe_console_print("Azure OpenAI LLM API request successful")
-                    self._safe_console_print(f"Processed text: {processed_text}", verbose=True)
-                    return processed_text
-                else:
-                    self._safe_console_print(f"Unexpected Azure OpenAI LLM API response structure: {response_data}", verbose=True)
-            else:
-                ConfigManager.console_print(f"Azure OpenAI LLM API error: {response.text}")
-            
-        except Exception as e:
-            ConfigManager.console_print(f"Error transcribing with Azure OpenAI LLM: {str(e)}")
-        
-        return text
-
-    def _process_azure_openai_responses(
-        self,
-        text: str,
-        system_message: str,
-        model: str,
-        headers: dict,
-        endpoint: str,
-        api_version: str,
-        deployment_name: str,
-        supports_structured_outputs: bool,
-        mode: str
-    ) -> str:
-        api_version_param = (api_version or 'v1').strip() or 'v1'
-        normalized_endpoint = endpoint.rstrip('/')
-        base_url = f"{normalized_endpoint}/openai/v1/responses?api-version={api_version_param}"
-        ConfigManager.console_print(f"Using Azure OpenAI Responses endpoint: {base_url}")
-
-        payload = {
-            "model": deployment_name,
-            "instructions": system_message,
-            "input": text,
-            "max_output_tokens": 1024,
-        }
-
-        reasoning_config = self._build_reasoning_config(model)
-        if reasoning_config:
-            payload["reasoning"] = reasoning_config
-
-        if supports_structured_outputs and mode == 'cleanup':
-            payload["text"] = self._cleanup_response_text_format()
-
-        try:
-            response = self._post_with_reasoning_effort_fallback(
-                base_url,
-                headers=headers,
-                payload=payload,
-                timeout=60,
-                provider_label="Azure OpenAI Responses"
-            )
-            self._safe_console_print(f"Azure OpenAI Responses status: {response.status_code}", verbose=True)
-
-            if response.status_code == 200:
-                response_data = response.json()
-                processed_text = self._extract_text_from_responses_output(response_data, cleanup_mode=(mode == 'cleanup'))
-                if processed_text:
-                    self._safe_console_print("Azure OpenAI Responses request successful", verbose=True)
-                    return processed_text
-                self._safe_console_print(f"Unexpected Azure Responses payload: {response_data}", verbose=True)
-            else:
-                ConfigManager.console_print(f"Azure OpenAI Responses error: {response.status_code} - {response.text}")
-        except Exception as exc:
-            ConfigManager.console_print(f"Error calling Azure OpenAI Responses API: {exc}")
-        return text
+        # On Azure the request carries the deployment name, so capabilities are
+        # resolved from that name unless the user pinned the model family.
+        return self._run_openai_compatible(
+            client,
+            text,
+            system_message,
+            request_model=deployment_name,
+            capability_model=deployment_name,
+            mode=mode,
+            provider_label="Azure OpenAI",
+            family=self._get_azure_model_family(mode),
+        )
 
     def _get_azure_deployment_name(self, mode: str) -> str | None:
         cleanup_name = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_cleanup_deployment_name')
         instruction_name = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_instruction_deployment_name')
+        # Kept until the config migration folds it into the per-mode settings.
         legacy_name = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_deployment_name')
 
         if mode == "instruction":
@@ -993,18 +976,15 @@ class LLMProcessor:
         return cleanup_name or legacy_name
 
     @staticmethod
-    def _azure_supports_structured_outputs(api_version: str | None) -> bool:
-        version_str = str(api_version or '').lower()
-        if version_str in ('v1', '1', 'latest'):
-            return True
-        if 'preview' in version_str:
-            return True
-        try:
-            year = int(version_str[:4])
-            return year >= 2025
-        except Exception:
-            return False
-    
+    def _get_azure_model_family(mode: str) -> str:
+        """Explicit model family for the deployment, or 'auto' to infer from its name."""
+        setting = (
+            'azure_openai_llm_instruction_model_family' if mode == 'instruction'
+            else 'azure_openai_llm_cleanup_model_family'
+        )
+        return ConfigManager.get_config_value('llm_post_processing', setting) or AZURE_MODEL_FAMILY_AUTO
+
+
     def get_available_models(self, api_type):
         """Get available models for the specified API type.
 

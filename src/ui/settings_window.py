@@ -15,6 +15,7 @@ from ui.base_window import BaseWindow, QT_WIDGETS_ARE_MOCKED
 from utils import ConfigManager
 from keyring_manager import KeyringManager
 from llm_processor import LLMProcessor
+from model_registry import is_reasoning_model
 from ui.model_refresh_worker import ModelRefreshWorker
 from whisper_languages import WHISPER_LANGUAGE_CHOICES, normalize_whisper_language
 
@@ -24,7 +25,17 @@ TEXT_INPUT_WIDGET_TYPES = tuple(
 )
 QWIDGET_IS_TYPE = isinstance(QWidget, type)
 QLINEEDIT_IS_TYPE = isinstance(QLineEdit, type)
-REASONING_MODEL_PREFIXES = ('gpt-5', 'o1')
+# Models offered in the cleanup/instruction dropdowns, best default first. Kept to
+# models that are current on both OpenAI and Azure as of July 2026; the combo is
+# editable so anything else can still be typed in.
+CURATED_LLM_MODELS = (
+    'gpt-5.6-luna',
+    'gpt-5.6-terra',
+    'gpt-5.6-sol',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.2',
+)
 
 # Single source of truth mapping a secret config key to its keyring entry name.
 # Keyed by (category, key) because the same key name can appear in several sections.
@@ -420,19 +431,12 @@ class SettingsWindow(BaseWindow):
 
     @staticmethod
     def _default_llm_model_choices():
-        """Return a curated list of OpenAI model IDs for quick selection."""
-        return [
-            'gpt-5.4',
-            'gpt-5.3-chat-latest',
-            'gpt-5.2',
-            'gpt-5.1',
-            'gpt-5.1-mini',
-            'gpt-4.1',
-            'gpt-4.1-mini',
-            'gpt-4o',
-            'gpt-4o-mini',
-            'gpt-3.5-turbo'
-        ]
+        """Currently supported OpenAI model IDs, best default first.
+
+        Retired and deprecated models are deliberately absent: the combo stays
+        editable, so anything omitted here can still be typed in by hand.
+        """
+        return list(CURATED_LLM_MODELS)
 
     def create_combobox(self, value, options):
         widget = QComboBox()
@@ -672,10 +676,8 @@ class SettingsWindow(BaseWindow):
 
     @staticmethod
     def _is_reasoning_model(value: str) -> bool:
-        if not value:
-            return False
-        lowered = value.strip().lower()
-        return any(lowered.startswith(prefix) for prefix in REASONING_MODEL_PREFIXES)
+        """True when the model takes a reasoning effort instead of a temperature."""
+        return bool(value) and is_reasoning_model(value)
 
     @staticmethod
     def _get_combobox_value(combo: QComboBox | None):
