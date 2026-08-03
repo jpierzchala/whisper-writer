@@ -5,58 +5,135 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 
-def test_azure_transcription_request_includes_language_prompt_and_temperature():
+def _azure_transcription_call(deployment, config_section, api_options_extra=None):
+    """Run transcribe_with_azure_openai against a mocked client, return its kwargs."""
     if 'transcription' in sys.modules:
         del sys.modules['transcription']
     sys.path.insert(0, 'src')
 
     import transcription
+    import vocabulary
 
-    with patch.object(transcription, 'ConfigManager') as mock_config, \
-         patch.object(transcription, 'KeyringManager') as mock_keyring, \
-         patch.object(transcription.requests, 'post') as mock_post:
+    try:
+        with patch.object(transcription, 'ConfigManager') as mock_config, \
+             patch.object(vocabulary, 'ConfigManager') as mock_vocab_config, \
+             patch.object(transcription, 'KeyringManager') as mock_keyring, \
+             patch.object(transcription, 'build_azure_client') as mock_build_client:
 
-        def mock_get_config_section(section):
-            if section == 'model_options':
-                return {
-                    'common': {
-                        'language': 'pl',
-                        'initial_prompt': 'PBIX, MyHub, Fabric',
-                        'temperature': 0.0
+            def mock_get_config_section(section):
+                if section == 'model_options':
+                    return config_section
+                if section == 'recording_options':
+                    return {'sample_rate': 16000}
+                if section == 'vocabulary':
+                    return {
+                        'terms': 'Nearshoring\nPBIX\nPower BI',
+                        'terms_file': '',
+                        'use_in_transcription': True,
+                        'use_in_cleanup': True,
                     }
-                }
-            if section == 'recording_options':
-                return {'sample_rate': 16000}
-            return {}
+                return {}
 
-        mock_config.get_config_section.side_effect = mock_get_config_section
-        mock_config.console_print = lambda *args, **kwargs: None
-        mock_keyring.get_api_key.return_value = 'test-azure-key'
+            mock_config.get_config_section.side_effect = mock_get_config_section
+            mock_config.console_print = lambda *args, **kwargs: None
+            mock_vocab_config.get_config_section.side_effect = mock_get_config_section
+            mock_vocab_config.console_print = lambda *args, **kwargs: None
+            mock_keyring.get_api_key.return_value = 'test-azure-key'
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'text': 'ok'}
-        mock_post.return_value = mock_response
+            result_obj = MagicMock()
+            result_obj.text = 'ok'
+            result_obj.languages = None
+            create = mock_build_client.return_value.audio.transcriptions.create
+            create.return_value = result_obj
 
-        result = transcription.transcribe_with_azure_openai(
-            np.zeros(16000, dtype=np.int16),
-            {
+            api_options = {
                 'azure_openai_endpoint': 'https://test.openai.azure.com',
                 'azure_openai_api_version': '2025-03-01-preview',
-                'azure_openai_deployment_name': 'whisper',
-                'model': 'whisper-1'
+                'azure_openai_deployment_name': deployment,
+                'model': 'whisper-1',
             }
-        )
+            api_options.update(api_options_extra or {})
 
-        assert result == 'ok'
+            text = transcription.transcribe_with_azure_openai(
+                np.zeros(16000, dtype=np.int16), api_options
+            )
+            assert text == 'ok'
+            return create.call_args.kwargs
+    finally:
+        sys.path.pop(0)
 
-        request_data = mock_post.call_args[1]['data']
-        assert request_data['model'] == 'whisper-1'
-        assert request_data['language'] == 'pl'
-        assert request_data['prompt'] == 'PBIX, MyHub, Fabric'
-        assert request_data['temperature'] == 0.0
 
-    sys.path.pop(0)
+def test_azure_whisper_request_includes_language_prompt_and_temperature():
+    kwargs = _azure_transcription_call('whisper', {
+        'common': {
+            'language': 'pl',
+            'initial_prompt': 'PBIX, MyHub, Fabric',
+            'temperature': 0.0,
+        }
+    })
+
+    assert kwargs['model'] == 'whisper'
+    assert kwargs['language'] == 'pl'
+    assert kwargs['prompt'] == 'PBIX, MyHub, Fabric'
+    assert kwargs['temperature'] == 0.0
+    # whisper takes neither the plural language field nor keyword hints.
+    assert 'languages' not in kwargs
+    assert 'keywords' not in kwargs
+
+
+def test_gpt_transcribe_uses_plural_languages_and_keywords():
+    """gpt-transcribe ignores the singular `language` field, so it must not be sent."""
+    kwargs = _azure_transcription_call('gpt-transcribe-global', {
+        'common': {
+            'language': 'pl',
+            'languages': '',
+            'initial_prompt': None,
+            'temperature': None,
+        }
+    })
+
+    assert kwargs['model'] == 'gpt-transcribe-global'
+    assert kwargs['languages'] == ['pl']
+    assert 'language' not in kwargs
+    assert kwargs['keywords'] == ['Nearshoring', 'PBIX', 'Power BI']
+
+
+def test_gpt_transcribe_honours_a_multi_language_list():
+    kwargs = _azure_transcription_call('gpt-transcribe-global', {
+        'common': {
+            'language': 'pl',
+            'languages': 'pl, en',
+            'initial_prompt': None,
+            'temperature': None,
+        }
+    })
+
+    assert kwargs['languages'] == ['pl', 'en']
+
+
+def test_auto_language_sends_no_language_hint_at_all():
+    kwargs = _azure_transcription_call('gpt-transcribe-global', {
+        'common': {
+            'language': 'auto',
+            'languages': '',
+            'initial_prompt': None,
+            'temperature': None,
+        }
+    })
+
+    assert 'languages' not in kwargs
+    assert 'language' not in kwargs
+
+
+def test_pinned_model_family_overrides_an_unrelated_deployment_name():
+    kwargs = _azure_transcription_call(
+        'prod-dictation',
+        {'common': {'language': 'pl', 'languages': '', 'initial_prompt': None, 'temperature': None}},
+        {'azure_openai_model_family': 'gpt-transcribe'},
+    )
+
+    assert kwargs['languages'] == ['pl']
+    assert kwargs['keywords'] == ['Nearshoring', 'PBIX', 'Power BI']
 
 
 def test_apply_transcription_hints_normalizes_dropdown_language_labels():

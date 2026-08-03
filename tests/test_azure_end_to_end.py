@@ -2,83 +2,71 @@ import sys
 import pytest
 from unittest.mock import patch, MagicMock
 
-def test_azure_openai_end_to_end_llm_flow():
-    """Test complete end-to-end flow for Azure OpenAI LLM processing."""
-    
+def test_azure_openai_end_to_end_llm_flow_in_legacy_mode():
+    """A config with a dated api-version keeps using the pre-v1 Azure endpoint."""
+
     sys.path.insert(0, 'src')
-    
-    with patch('llm_processor.requests.post') as mock_post, \
+
+    with patch('openai_clients.AzureOpenAI') as mock_azure_client, \
          patch('llm_processor.ConfigManager') as mock_config, \
          patch('llm_processor.KeyringManager') as mock_keyring:
-        
-        # Mock successful configuration
+
         mock_config.get_config_section.return_value = {
             'api_type': 'azure_openai',
             'enabled': True,
             'temperature': 0.3
         }
-        
+
         mock_config.get_config_value.side_effect = lambda section, key: {
             ('llm_post_processing', 'azure_openai_llm_endpoint'): 'https://test.openai.azure.com',
-            ('llm_post_processing', 'azure_openai_llm_deployment_name'): 'gpt-4o-deployment',
+            ('llm_post_processing', 'azure_openai_llm_cleanup_deployment_name'): 'gpt-4o-deployment',
+            ('llm_post_processing', 'azure_openai_llm_cleanup_model_family'): 'chat',
+            # No explicit mode: a dated api-version must be honoured as legacy.
             ('llm_post_processing', 'azure_openai_llm_api_version'): '2024-02-01',
             ('llm_post_processing', 'cleanup_model'): 'gpt-4o-mini',
             ('llm_post_processing', 'system_prompt'): 'You are a helpful assistant.'
         }.get((section, key))
-        
+
         mock_config.console_print = lambda *args, **kwargs: None
+        mock_config.should_log_cleanup_prompt.return_value = False
         mock_keyring.get_api_key.return_value = "test-azure-llm-key"
-        
-        # Mock successful Azure OpenAI API response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'choices': [{
-                'message': {
-                    'content': 'This is the cleaned up text from Azure OpenAI.'
-                }
-            }]
-        }
-        mock_post.return_value = mock_response
-        
+
+        completion = MagicMock()
+        completion.output_text = None
+        completion.output = None
+        completion.choices = [MagicMock()]
+        completion.choices[0].message.refusal = None
+        completion.choices[0].message.content = 'This is the cleaned up text from Azure OpenAI.'
+        mock_azure_client.return_value.chat.completions.create.return_value = completion
+
         from llm_processor import LLMProcessor
-        
-        # Initialize processor
+
         processor = LLMProcessor(api_type='azure_openai')
-        
-        # Process text through complete flow
+
         input_text = "this is some messy text that needs cleaning"
         system_message = "You are a helpful assistant that cleans up text."
-        
+
         result = processor.process_text(input_text, system_message)
-        
-        # Verify end-to-end result
+
         assert result == 'This is the cleaned up text from Azure OpenAI.'
-        
-        # Verify API call was made correctly
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        
-        # Verify URL construction
-        url = call_args[0][0]
-        assert 'test.openai.azure.com' in url
-        assert 'gpt-4o-deployment' in url
-        assert 'chat/completions' in url
-        assert 'api-version=2024-02-01' in url
-        
-        # Verify headers
-        headers = call_args[1]['headers']
-        assert headers['api-key'] == 'test-azure-llm-key'
-        assert headers['Content-Type'] == 'application/json'
-        
-        # Verify request body
-        request_data = call_args[1]['json']
-        assert request_data['messages'][0]['role'] == 'system'
-        assert request_data['messages'][0]['content'] == system_message
-        assert request_data['messages'][1]['role'] == 'user'
-        assert '<transcript>' in request_data['messages'][1]['content']
-        assert input_text in request_data['messages'][1]['content']
-        assert request_data['temperature'] == 0.0
+
+        # Legacy mode uses the AzureOpenAI client bound to the dated api-version.
+        mock_azure_client.assert_called_once()
+        client_kwargs = mock_azure_client.call_args.kwargs
+        assert client_kwargs['azure_endpoint'] == 'https://test.openai.azure.com'
+        assert client_kwargs['api_version'] == '2024-02-01'
+        assert client_kwargs['api_key'] == 'test-azure-llm-key'
+
+        create = mock_azure_client.return_value.chat.completions.create
+        create.assert_called_once()
+        kwargs = create.call_args.kwargs
+        assert kwargs['model'] == 'gpt-4o-deployment'
+        assert kwargs['messages'][0]['role'] == 'system'
+        assert kwargs['messages'][0]['content'] == system_message
+        assert kwargs['messages'][1]['role'] == 'user'
+        assert '<transcript>' in kwargs['messages'][1]['content']
+        assert input_text in kwargs['messages'][1]['content']
+        assert kwargs['temperature'] == 0.0
 
 def test_azure_openai_transcription_and_llm_integration():
     """Test integration between Azure OpenAI transcription and LLM processing."""

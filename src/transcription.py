@@ -19,7 +19,25 @@ except Exception:  # pragma: no cover - optional in tests
 from utils import ConfigManager
 from keyring_manager import KeyringManager
 from text_processor import TextProcessor
+from model_registry import AZURE_MODEL_FAMILY_AUTO, resolve_transcription_capabilities
+from openai_clients import (
+    AZURE_MODE_LEGACY,
+    build_azure_client,
+    build_openai_client,
+    resolve_azure_api_mode,
+)
+from vocabulary import get_transcription_keywords
 from whisper_languages import normalize_whisper_language
+
+# (connect, read) timeouts for transcription HTTP calls made without the SDK. The
+# read budget has to cover uploading and transcribing a full recording, so it is
+# deliberately generous.
+REQUEST_TIMEOUT = (10, 180)
+TRANSCRIPTION_TIMEOUT = 180.0
+
+# Azure audio still lives on the dated api-version path; this version is the oldest
+# one confirmed to serve gpt-transcribe.
+DEFAULT_AZURE_AUDIO_API_VERSION = '2025-03-01-preview'
 
 VOSK_MODEL_URLS = {
     'vosk-model-small-en-us-0.15': 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip',
@@ -46,6 +64,23 @@ def get_transcription_hints() -> dict:
         'temperature': common_options.get('temperature')
     }
 
+def get_configured_languages() -> list:
+    """Languages for models taking the plural `languages` field.
+
+    Falls back to the single configured language, and to nothing at all when that
+    is 'auto', which leaves the model free to detect the language itself.
+    """
+    common_options = ConfigManager.get_config_section('model_options').get('common', {})
+    configured = common_options.get('languages')
+
+    if configured:
+        codes = [part.strip() for part in str(configured).replace(';', ',').split(',')]
+        normalized = [normalize_whisper_language(code) for code in codes if code.strip()]
+        return [code for code in normalized if code]
+
+    single = normalize_whisper_language(common_options.get('language'))
+    return [single] if single else []
+
 def apply_transcription_hints(request_data: dict) -> dict:
     """Populate supported transcription hint parameters into an API request payload."""
     hints = get_transcription_hints()
@@ -70,6 +105,75 @@ def apply_transcription_hints(request_data: dict) -> dict:
         verbose=True
     )
     return request_data
+
+def build_transcription_request(model: str, family: str = AZURE_MODEL_FAMILY_AUTO) -> dict:
+    """Build the request arguments a specific transcription model accepts.
+
+    Models differ in ways that fail quietly rather than loudly: gpt-transcribe
+    ignores the singular `language` field instead of rejecting it, so sending the
+    wrong one means the language hint is simply lost.
+    """
+    capabilities = resolve_transcription_capabilities(model, family)
+    hints = get_transcription_hints()
+    request = {}
+
+    if capabilities.language_param == 'languages':
+        languages = get_configured_languages()
+        if languages:
+            request['languages'] = languages
+    elif capabilities.language_param == 'language' and hints.get('language'):
+        request['language'] = hints['language']
+
+    if capabilities.supports_prompt and hints.get('prompt'):
+        request['prompt'] = hints['prompt']
+
+    if capabilities.supports_temperature and hints.get('temperature') is not None:
+        request['temperature'] = hints['temperature']
+
+    if capabilities.supports_keywords:
+        keywords = get_transcription_keywords()
+        if keywords:
+            request['keywords'] = keywords
+
+    ConfigManager.console_print(
+        "Transcription request: "
+        + ", ".join(
+            f"{key}={len(value) if isinstance(value, list) else value!r}"
+            for key, value in sorted(request.items())
+        ),
+        verbose=True
+    )
+    return request
+
+def encode_wav(audio_data) -> bytes:
+    """Encode recorded samples as an in-memory WAV file for upload."""
+    byte_io = io.BytesIO()
+    sf.write(byte_io, audio_data, get_recording_sample_rate(), format='wav')
+    return byte_io.getvalue()
+
+def check_upload_size(wav_bytes: bytes, capabilities) -> bool:
+    """Warn and refuse when a recording exceeds the API's hard file-size limit."""
+    if len(wav_bytes) <= capabilities.max_file_bytes:
+        return True
+    ConfigManager.console_print(
+        f"Recording is {len(wav_bytes) / 1024 / 1024:.1f} MB, over the "
+        f"{capabilities.max_file_bytes / 1024 / 1024:.0f} MB limit for the transcription API. "
+        "Record shorter clips or switch to a local model."
+    )
+    return False
+
+def read_transcription_text(result) -> str:
+    """Pull the text out of an SDK transcription result, logging detected languages."""
+    detected = getattr(result, 'languages', None)
+    if detected:
+        codes = [
+            item.get('code') if isinstance(item, dict) else getattr(item, 'code', None)
+            for item in detected
+        ]
+        ConfigManager.console_print(
+            f"Detected language(s): {', '.join(code for code in codes if code)}", verbose=True
+        )
+    return getattr(result, 'text', '') or ''
 
 def is_vosk_model(model_name: str) -> bool:
     """Check if the model name is a Vosk model"""
@@ -335,125 +439,92 @@ def transcribe_api(audio_data):
         return ''
 
 def transcribe_with_openai(audio_data, api_options):
-    """Transcribe audio using OpenAI's Whisper API."""
+    """Transcribe audio through the OpenAI API (or an OpenAI-compatible endpoint)."""
     try:
         api_key = KeyringManager.get_api_key("openai_transcription")
         if not api_key:
             ConfigManager.console_print("OpenAI API key not found in keyring")
             return ''
-            
-        # Use base_url from config, or fallback to OpenAI's API
-        base_url = api_options.get('base_url') or 'https://api.openai.com/v1'
-        ConfigManager.console_print(f"Using OpenAI endpoint: {base_url}")
-        
-        headers = {
-            "Authorization": f"Bearer {api_key}"
-        }
-        
-        # Convert audio to WAV file
-        byte_io = io.BytesIO()
-        sample_rate = get_recording_sample_rate()
-        sf.write(byte_io, audio_data, sample_rate, format='wav')
-        byte_io.seek(0)
-        
-        model = api_options['model']
 
-        files = {
-            'file': ('audio.wav', byte_io, 'audio/wav'),
-        }
-        data = apply_transcription_hints({'model': model})
-        
-        ConfigManager.console_print(f"Sending request to OpenAI API using {model}...")
-        response = requests.post(
-            f"{base_url}/audio/transcriptions",
-            headers=headers,
-            files=files,
-            data=data
-        )
-        
-        if response.status_code == 200:
-            result = response.json()['text']
-            ConfigManager.console_print("OpenAI API request successful")
-            ConfigManager.console_print(f"Transcription: {result}")
-            return result
-        else:
-            ConfigManager.console_print(f"OpenAI API error: {response.text}")
+        model = api_options['model']
+        capabilities = resolve_transcription_capabilities(model)
+
+        wav_bytes = encode_wav(audio_data)
+        if not check_upload_size(wav_bytes, capabilities):
             return ''
-            
+
+        base_url = api_options.get('base_url') or None
+        client = build_openai_client(api_key, base_url=base_url, timeout=TRANSCRIPTION_TIMEOUT)
+
+        ConfigManager.console_print(f"Sending request to OpenAI API using {model}...")
+        result = client.audio.transcriptions.create(
+            model=model,
+            file=('audio.wav', wav_bytes, 'audio/wav'),
+            **build_transcription_request(model)
+        )
+
+        text = read_transcription_text(result)
+        ConfigManager.console_print(f"Transcription: {text}")
+        return text
+
     except Exception as e:
         ConfigManager.console_print(f"Error transcribing with OpenAI: {str(e)}")
         return ''
 
 def transcribe_with_azure_openai(audio_data, api_options):
-    """Transcribe audio using Azure OpenAI's Whisper API."""
+    """Transcribe audio through Azure OpenAI / Microsoft Foundry.
+
+    Defaults to the classic `/openai/deployments/<name>/audio/transcriptions` path:
+    the v1 API does not serve audio on Azure resources yet (it answers
+    DeploymentNotFound even for deployments that work on the classic path).
+    """
     try:
         api_key = KeyringManager.get_api_key("azure_openai_transcription")
         if not api_key:
             ConfigManager.console_print("Azure OpenAI API key not found in keyring")
             return ''
-            
-        # Get Azure OpenAI specific configuration
+
         endpoint = api_options.get('azure_openai_endpoint')
-        api_version = api_options.get('azure_openai_api_version', '2024-02-01')
+        api_version = api_options.get('azure_openai_api_version') or DEFAULT_AZURE_AUDIO_API_VERSION
         deployment_name = api_options.get('azure_openai_deployment_name')
-        
-        if not endpoint:
-            ConfigManager.console_print("Azure OpenAI endpoint not configured")
-            return ''
-            
+        api_mode = resolve_azure_api_mode(
+            api_options.get('azure_api_mode') or AZURE_MODE_LEGACY, api_version
+        )
+
         if not deployment_name:
             ConfigManager.console_print("Azure OpenAI deployment name not configured")
             return ''
-        ConfigManager.console_print(f"Using Azure OpenAI deployment: {deployment_name}")
-            
-        # Construct Azure OpenAI URL  
-        base_url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment_name}/audio/transcriptions"
-        ConfigManager.console_print(f"Using Azure OpenAI endpoint: {base_url}")
-        
-        headers = {
-            "api-key": api_key,
-            "Content-Type": "multipart/form-data"
-        }
-        
-        # Convert audio to WAV file
-        byte_io = io.BytesIO()
-        sample_rate = get_recording_sample_rate()
-        sf.write(byte_io, audio_data, sample_rate, format='wav')
-        byte_io.seek(0)
-        
-        model = api_options['model']
 
-        files = {
-            'file': ('audio.wav', byte_io, 'audio/wav'),
-        }
-        data = apply_transcription_hints({
-            'model': model,
-        })
-        
-        params = {
-            'api-version': api_version
-        }
-        
-        ConfigManager.console_print(
-            f"Sending request to Azure OpenAI API using deployment {deployment_name} with model parameter {model}..."
-        )
-        response = requests.post(
-            base_url,
-            headers={'api-key': api_key},  # Simplified headers for Azure OpenAI
-            files=files,
-            data=data,
-            params=params
-        )
-        
-        if response.status_code == 200:
-            result = response.json()['text']
-            ConfigManager.console_print("Azure OpenAI API request successful")
-            ConfigManager.console_print(f"Transcription: {result}")
-            return result
-        else:
-            ConfigManager.console_print(f"Azure OpenAI API error: {response.text}")
+        # On Azure the deployment name identifies the model, so it also drives the
+        # capability lookup unless the user pinned the family explicitly.
+        family = api_options.get('azure_openai_model_family') or AZURE_MODEL_FAMILY_AUTO
+        capabilities = resolve_transcription_capabilities(deployment_name, family)
+
+        wav_bytes = encode_wav(audio_data)
+        if not check_upload_size(wav_bytes, capabilities):
             return ''
-            
+
+        client = build_azure_client(
+            api_key,
+            endpoint,
+            api_mode=api_mode,
+            api_version=api_version,
+            timeout=TRANSCRIPTION_TIMEOUT,
+        )
+
+        ConfigManager.console_print(
+            f"Sending request to Azure OpenAI deployment {deployment_name} ({api_mode} API)..."
+        )
+        result = client.audio.transcriptions.create(
+            model=deployment_name,
+            file=('audio.wav', wav_bytes, 'audio/wav'),
+            **build_transcription_request(deployment_name, family)
+        )
+
+        text = read_transcription_text(result)
+        ConfigManager.console_print(f"Transcription: {text}")
+        return text
+
     except Exception as e:
         ConfigManager.console_print(f"Error transcribing with Azure OpenAI: {str(e)}")
         return ''
@@ -496,7 +567,8 @@ def transcribe_with_deepgram(audio_data, api_options):
             DEEPGRAM_BASE_URL,
             headers=headers,
             params=params,
-            data=audio_data
+            data=audio_data,
+            timeout=REQUEST_TIMEOUT
         )
         
         if response.status_code == 200:

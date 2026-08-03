@@ -15,10 +15,12 @@ from result_thread import ResultThread
 from ui.main_window import MainWindow
 from ui.settings_window import SettingsWindow
 from ui.status_window import StatusWindow
+from ui.theme import apply_theme
 from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
 from llm_processor import LLMProcessor
+from vocabulary import append_glossary
 
 
 class WhisperWriterApp(QObject):
@@ -31,6 +33,8 @@ class WhisperWriterApp(QObject):
         super().__init__()
         self.app = QApplication(sys.argv)
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
+        # Style every window from one stylesheet, following the system light/dark mode.
+        apply_theme(self.app)
 
         ConfigManager.initialize()
         
@@ -224,6 +228,72 @@ class WhisperWriterApp(QObject):
         if should_resume and getattr(self, 'key_listener', None):
             self.key_listener.start()
 
+    @staticmethod
+    def build_system_message(mode_name):
+        """Assemble the system message for one post-processing mode.
+
+        Each mode has an inline message in the settings plus an optional companion
+        file whose contents are appended. The file is re-read on every call so
+        editing it takes effect without restarting the app.
+        """
+        setting_by_mode = {
+            'instruction': 'instruction_system_message',
+            'cleanup': 'system_prompt',
+            'text_cleanup': 'text_cleanup_system_message',
+        }
+        setting = setting_by_mode[mode_name]
+
+        base_message = ConfigManager.get_config_value("llm_post_processing", setting)
+        file_path = ConfigManager.get_config_value("llm_post_processing", f"{setting}_file_path")
+
+        system_message = base_message.strip() if base_message else ""
+        log_prompt = ConfigManager.should_log_cleanup_prompt()
+
+        if log_prompt:
+            ConfigManager.console_print(f"Retrieved {mode_name} base message: {system_message}", verbose=True)
+        else:
+            ConfigManager.console_print(f"Retrieved {mode_name} base message from settings", verbose=True)
+
+        if not file_path:
+            ConfigManager.console_print("No prompt file set; using only the system message from settings", verbose=True)
+        elif not os.path.exists(file_path):
+            ConfigManager.console_print(
+                f"Prompt file not found: {file_path}; using only the system message from settings"
+            )
+        else:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as prompt_file:
+                    file_content = prompt_file.read().strip()
+                if file_content:
+                    system_message = f"{system_message}\n\n{file_content}" if system_message else file_content
+                    ConfigManager.console_print(f"Appended fresh prompt content from {file_path}", verbose=True)
+            except Exception as e:
+                ConfigManager.console_print(f"Error reading system message file: {str(e)}")
+
+        # Cleanup modes also get the domain glossary, so terms the transcription
+        # got wrong are normalised to their canonical spelling.
+        if mode_name in ('cleanup', 'text_cleanup'):
+            system_message = append_glossary(system_message)
+
+        if log_prompt:
+            ConfigManager.console_print(f"Final {mode_name} system message: {system_message}", verbose=True)
+        else:
+            ConfigManager.console_print(f"Final {mode_name} system message prepared", verbose=True)
+
+        return system_message
+
+    def _report_cleanup_rejection(self, reason, context):
+        """Log a rejected cleanup result, noting whether the model met the JSON contract.
+
+        Rejections silently substitute the raw transcript, which would otherwise
+        make a model comparison look like a no-op rather than a failure.
+        """
+        structured = getattr(self.llm_processor, 'last_output_was_structured', False)
+        contract = "matched the JSON contract" if structured else "did not use structured output"
+        ConfigManager.console_print(
+            f"{context} rejected ({reason}); the reply {contract}. Falling back to the original text."
+        )
+
     def on_transcription_complete(self, result):
         """Process transcription with or without LLM based on activation type."""
         listener_was_running = False
@@ -234,63 +304,23 @@ class WhisperWriterApp(QObject):
             recording_mode = ConfigManager.get_config_value('recording_options', 'recording_mode')
             if self.use_llm and self.llm_processor and recording_mode in ('press_to_toggle', 'hold_to_record', 'continuous', 'voice_activity_detection'):
                 try:
-                    # Get the system message based on the mode
-                    if self.is_instruction_mode:
-                        base_message = ConfigManager.get_config_value("llm_post_processing", "instruction_system_message")
-                        file_path = ConfigManager.get_config_value("llm_post_processing", "instruction_system_message_file_path")
-                        mode_name = "instruction"
-                    else:
-                        base_message = ConfigManager.get_config_value("llm_post_processing", "system_prompt")
-                        file_path = ConfigManager.get_config_value("llm_post_processing", "system_prompt_file_path")
-                        mode_name = "cleanup"
-                    
-                    # Start with a clean system message
-                    system_message = base_message.strip() if base_message else ""
+                    mode_name = "instruction" if self.is_instruction_mode else "cleanup"
+                    system_message = self.build_system_message(mode_name)
                     log_cleanup_prompt = ConfigManager.should_log_cleanup_prompt()
-                    
-                    if mode_name == "cleanup" and not log_cleanup_prompt:
-                        ConfigManager.console_print("Retrieved cleanup base message from settings", verbose=True)
-                    else:
-                        ConfigManager.console_print(f"Retrieved {mode_name} base message from settings: {system_message}", verbose=True)
-                    
-                    if not file_path:
-                        ConfigManager.console_print("No file path set, using only the system message from settings")
-                    elif not os.path.exists(file_path):
-                        ConfigManager.console_print(f"File path set but file not found: {file_path}, using only the system message from settings")
-                    
-                    # Append file contents if file path exists and is not empty
-                    if file_path and os.path.exists(file_path):
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as file:
-                                file_content = file.read().strip()
-                                if file_content:  # Only append if file has content
-                                    if system_message:
-                                        system_message = f"{system_message}\n\n{file_content}"
-                                    else:
-                                        system_message = file_content
-                                    ConfigManager.console_print(f"Added fresh file content from {file_path}", verbose=True)
-                        except Exception as e:
-                            ConfigManager.console_print(f"Error reading system message file: {str(e)}")
-                    
+
                     if not system_message:
                         ConfigManager.console_print("Warning: No system message found, using original transcription")
                     else:
-                        if mode_name == "cleanup" and not log_cleanup_prompt:
-                            ConfigManager.console_print("Final cleanup system message prepared for LLM", verbose=True)
-                        else:
-                            ConfigManager.console_print(f"Final system message being sent to LLM: {system_message}", verbose=True)
                         original_result = result
                         processed_result = self.llm_processor.process_text(result, system_message, mode=mode_name)
-                        if processed_result is not None:
+                        if processed_result is not None and log_cleanup_prompt:
                             ConfigManager.console_print(f"Cleanup raw output: {processed_result}", verbose=True)
                         if processed_result:
                             candidate_result = processed_result.strip()
                             if mode_name == "cleanup":
                                 rejection_reason = LLMProcessor.get_cleanup_rejection_reason(original_result, candidate_result)
                                 if rejection_reason:
-                                    ConfigManager.console_print(
-                                        f"Cleanup output rejected; falling back to original transcription ({rejection_reason})."
-                                    )
+                                    self._report_cleanup_rejection(rejection_reason, "Cleanup output")
                                     result = original_result
                                 else:
                                     result = candidate_result
@@ -367,54 +397,21 @@ class WhisperWriterApp(QObject):
             
             ConfigManager.console_print(f"Processing clipboard text: {clipboard_text[:100]}...", verbose=True)
             
-            # Get the base system message
-            base_message = ConfigManager.get_config_value("llm_post_processing", "text_cleanup_system_message")
-            file_path = ConfigManager.get_config_value("llm_post_processing", "text_cleanup_system_message_file_path")
-            
-            # Start with a clean system message
-            system_message = base_message.strip() if base_message else ""
-            log_cleanup_prompt = ConfigManager.should_log_cleanup_prompt()
-            
-            if log_cleanup_prompt:
-                ConfigManager.console_print(f"Base cleanup system message: {system_message}", verbose=True)
-            else:
-                ConfigManager.console_print("Base cleanup system message retrieved", verbose=True)
-            
-            # Append file contents if file path exists and is not empty
-            if file_path and os.path.exists(file_path):
-                try:
-                    ConfigManager.console_print(f"Reading cleanup instructions from file: {file_path}", verbose=True)
-                    with open(file_path, 'r', encoding='utf-8') as file:
-                        file_content = file.read().strip()
-                        if file_content:  # Only append if file has content
-                            if system_message:
-                                system_message = f"{system_message}\n\n{file_content}"
-                            else:
-                                system_message = file_content
-                            ConfigManager.console_print("Successfully added file content to cleanup instructions", verbose=True)
-                except Exception as e:
-                    ConfigManager.console_print(f"Error reading cleanup system message file: {str(e)}")
-            
+            system_message = self.build_system_message("text_cleanup")
             if not system_message:
                 ConfigManager.console_print("Warning: No cleanup system message found")
                 return
-            
-            if log_cleanup_prompt:
-                ConfigManager.console_print(f"Final cleanup system message: {system_message}", verbose=True)
-            else:
-                ConfigManager.console_print("Final cleanup system message prepared", verbose=True)
-            
+
             # Run through LLM cleanup
             cleaned_text = self.llm_processor.process_text(clipboard_text, system_message, mode="cleanup")
-            ConfigManager.console_print(f"Cleanup output (clipboard): {cleaned_text}", verbose=True)
+            if ConfigManager.should_log_cleanup_prompt():
+                ConfigManager.console_print(f"Cleanup output (clipboard): {cleaned_text}", verbose=True)
 
             if cleaned_text:
                 cleaned_text = cleaned_text.strip()
                 rejection_reason = LLMProcessor.get_cleanup_rejection_reason(clipboard_text, cleaned_text)
                 if rejection_reason:
-                    ConfigManager.console_print(
-                        f"Clipboard cleanup output rejected; leaving original text untouched ({rejection_reason})."
-                    )
+                    self._report_cleanup_rejection(rejection_reason, "Clipboard cleanup output")
                     cleaned_text = clipboard_text
             
             if cleaned_text and cleaned_text != clipboard_text:

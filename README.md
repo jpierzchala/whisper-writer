@@ -28,9 +28,12 @@ Transcription options:
   - All `faster-whisper` models, including newer models like `distil-large-v3` and `large-v3-turbo`.
   - Selected `vosk` models.
 - **API options:**
-  - [OpenAI's](https://platform.openai.com/docs/guides/speech-to-text) `whisper-1` model.
+  - [OpenAI's](https://developers.openai.com/api/docs/guides/speech-to-text) `gpt-transcribe` (recommended), `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` and `whisper-1` models.
+  - **Azure OpenAI / Microsoft Foundry** deployments of the same models, including `gpt-transcribe`.
   - [Deepgram's](https://developers.deepgram.com/docs/model) `nova-3` and `nova-2` models.
   - [Groq's](https://console.groq.com/docs/speech-text) `whisper-large-v3-turbo`, `distil-whisper-large-v3-en`, and `whisper-large-v3` models.
+
+`gpt-transcribe` additionally accepts a list of domain terms as keyword hints, so product and project names are recognised correctly rather than corrected afterwards. See [Vocabulary](#vocabulary).
 
 LLM options:
 
@@ -42,7 +45,9 @@ LLM options:
   - [Google](https://ai.google.dev/gemini-api/docs/models/gemini) (Gemini)
   - [Groq](https://console.groq.com/docs/models) (all text models)
 
-When using an API for LLM processing, specify any official model name your API key can access. Use model names as they're listed in the API provider's documentation - e.g. `gemini-1.5-flash`, `gpt-4o-mini`, `claude-3-5-sonnet-latest`, etc.
+  - **Azure OpenAI / Microsoft Foundry** deployments.
+
+When using an API for LLM processing, specify any official model name your API key can access, as listed in the provider's documentation. The default is `gpt-5.6-luna`, chosen for latency: cleanup runs while you wait for the text to appear.
 
 WhisperWriter includes the following recording modes:
 
@@ -182,24 +187,38 @@ The first time you open the app, if a configuration file doesn't exist, a Settin
 - `use_api`: Toggle to choose whether to use the OpenAI API or a local Whisper model for transcription. (Default: `false`)
 - `common`: Options common to both API and local models.
   - `language`: The language code for the transcription in [ISO-639-1 format](https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes). (Default: `null`)
+  - `languages`: Comma-separated languages for models that accept several at once (currently `gpt-transcribe`), e.g. `pl,en` when you mix English terms into Polish dictation. Leave empty to use the single language above. Note that `gpt-transcribe` silently ignores the single-language field, so this is the only way to give it a language hint. (Default: empty)
   - `temperature`: Controls the randomness of the transcription output. Lower values make the output more focused and deterministic. (Default: `0.0`)
   - `initial_prompt`: A string used as an initial prompt to condition the transcription. More info: [OpenAI Prompting Guide](https://platform.openai.com/docs/guides/speech-to-text/prompting). (Default: `null`)
 
-- `api`: Configuration options for the OpenAI API. See the [OpenAI API documentation](https://platform.openai.com/docs/api-reference/audio/create?lang=python) for more information.
+#### Vocabulary
+
+Domain terms — product names, project names, jargon — that speech recognition tends to get wrong. One list, used in two places, because they catch different mistakes: keyword hints fix recognition at the source, while the glossary fixes whatever still came out wrong.
+
+- `terms`: Terms, one per line. Lines starting with `#` are comments. Terms must not contain `<`, `>` or line breaks (the API rejects the whole request over one bad keyword, so such terms are dropped with a warning). (Default: empty)
+- `terms_file`: Path to a text file of terms, merged with the inline list above. (Default: empty)
+- `use_in_transcription`: Send the terms to the transcription model as keyword hints. Only models that support this use them (currently `gpt-transcribe`); others ignore the setting. Keywords are hints, not substitutions. (Default: `true`)
+- `use_in_cleanup`: Append the terms to the LLM cleanup prompt as a glossary. (Default: `true`)
+
+For substitutions that must always happen regardless of what the model decides, use `find_replace_file` instead.
+
+- `api`: Configuration options for the transcription APIs.
   - `provider`: The provider to use for transcription. Current options include `openai`, `azure_openai`, `deepgram`, and `groq`. (Default: `openai`)
   - `model`: The model to use for transcription. Supported models:
-    - OpenAI: `whisper-1`
-    - Azure OpenAI: `whisper-1` (or your custom deployment name)
+    - OpenAI: `gpt-transcribe` (recommended — highest accuracy and the only one that accepts keyword hints), `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1` (legacy; still the only model offering word timestamps)
+    - Azure OpenAI: ignored — the deployment name selects the model
     - Deepgram: `nova-3` and `nova-2`
     - Groq: `whisper-large-v3-turbo`, `distil-whisper-large-v3-en`, and `whisper-large-v3`
   - `base_url`: The base URL for the API. Can be changed to use a local API endpoint, such as [LocalAI](https://localai.io/). (Default: `https://api.openai.com/v1`)
-  - `openai_transcription_key`: Your API key for the OpenAI API. Required for OpenAI transcription. (Default: `null`)
-  - `azure_openai_api_key`: Your API key for the Azure OpenAI service. Required for Azure OpenAI transcription. (Default: `null`)
-  - `azure_openai_endpoint`: Your Azure OpenAI endpoint URL (e.g., `https://your-resource.openai.azure.com`). Required for Azure OpenAI transcription. (Default: `null`)
-  - `azure_openai_api_version`: The API version to use for Azure OpenAI service. (Default: `2024-02-01`)
-  - `azure_openai_deployment_name`: The deployment name for your Azure OpenAI Whisper model. Required for Azure OpenAI transcription. (Default: `null`)
-  - `deepgram_transcription_key`: Your API key for the Deepgram API. Required for Deepgram transcription. (Default: `null`)
-  - `groq_transcription_key`: Your API key for the Groq API. Required for Groq transcription. (Default: `null`)
+  - `openai_transcription_api_key`: Your API key for the OpenAI API. Required for OpenAI transcription. (Default: `null`)
+  - `azure_openai_api_key`: Your API key for the Azure OpenAI / Foundry resource. (Default: `null`)
+  - `azure_openai_endpoint`: Your Azure resource endpoint. All three hostname forms work: `https://NAME.openai.azure.com`, `https://NAME.services.ai.azure.com` (AI Foundry) and `https://NAME.cognitiveservices.azure.com`. (Default: `null`)
+  - `azure_openai_deployment_name`: The name of your Azure/Foundry transcription deployment, e.g. `gpt-transcribe-global`. This is the deployment name from the portal, not the model name. (Default: `null`)
+  - `azure_openai_model_family`: Which model that deployment runs — `auto` infers it from the deployment name. Pin it if your deployment has an unrelated name, because getting it wrong means language hints and keyword hints are silently dropped. (Default: `auto`)
+  - `azure_api_mode`: Which Azure API surface to use for audio. Keep `legacy`: Azure does not serve audio transcription on the v1 API and answers `DeploymentNotFound` there even for deployments that work on the classic path. (Default: `legacy`)
+  - `azure_openai_api_version`: The API version for Azure audio transcription in legacy mode. `gpt-transcribe` needs `2025-03-01-preview` or newer. (Default: `2025-03-01-preview`)
+  - `deepgram_transcription_api_key`: Your API key for the Deepgram API. Required for Deepgram transcription. (Default: `null`)
+  - `groq_transcription_api_key`: Your API key for the Groq API. Required for Groq transcription. (Default: `null`)
 
 - `local`: Configuration options for the local Whisper model.
   - `model`: The model to use for transcription. The larger models provide better accuracy but are slower. See [available models and languages](https://github.com/openai/whisper?tab=readme-ov-file#available-models-and-languages). (Default: `base`)
@@ -244,14 +263,22 @@ The first time you open the app, if a configuration file doesn't exist, a Settin
 - `openai_api_key`: Your API key for the OpenAI API. Required for OpenAI post-processing. (Default: `null`)
 - `gemini_api_key`: Your API key for the Google Gemini API. Required for Gemini post-processing. (Default: `null`)
 - `groq_api_key`: Your API key for the Groq LLM service. Required for Groq post-processing. (Default: `null`)
-- `cleanup_model`: The model to use for cleanup post-processing. (Default: `gpt-4o-mini`)
-- `instruction_model`: The model to use for instruction post-processing. (Default: `gpt-4o-mini`)
+- `azure_openai_llm_api_key` / `azure_openai_llm_endpoint`: Credentials for the Azure OpenAI / Foundry resource. (Default: `null`)
+- `azure_openai_llm_cleanup_deployment_name` / `azure_openai_llm_instruction_deployment_name`: Your Azure deployment names, e.g. `gpt-5.6-luna-datazone`. On Azure these select the model; `cleanup_model` and `instruction_model` are ignored.
+- `azure_openai_llm_cleanup_model_family` / `azure_openai_llm_instruction_model_family`: Which model each deployment runs. `auto` infers it from the deployment name; pin it if your deployment has an unrelated name. (Default: `auto`)
+- `azure_api_mode`: `v1` uses the current OpenAI-compatible Azure API, which needs no api-version and works with both `*.openai.azure.com` and Foundry `*.services.ai.azure.com` endpoints. (Default: `v1`)
+- `cleanup_model`: The model to use for cleanup post-processing. (Default: `gpt-5.6-luna`)
+- `instruction_model`: The model to use for instruction post-processing. (Default: `gpt-5.6-luna`)
+- `cleanup_reasoning_effort`: How much the model may think before answering during cleanup. Keep `none`: you are waiting for the text to appear, and thinking tokens are pure added latency for a mechanical edit. Clamped automatically to the levels the chosen model supports. (Default: `none`)
+- `instruction_reasoning_effort`: The same for instruction mode, where some reasoning usually pays off. Escalate this before switching to a bigger model. (Default: `low`)
 - `system_prompt`: The system prompt to use for post-processing. (Default: `You are a helpful assistant that cleans up transcribed text. Fix any grammar, punctuation, or formatting issues while maintaining the original meaning.`)
 - `instruction_system_message`: The system message to use for instruction post-processing. (Default: `You are an AI assistant. Interpret the user's text as instructions and respond appropriately. Be concise and direct in your responses.`)
 - `temperature`: The temperature to use for post-processing. (Default: `0.3`)
 - `text_cleanup_system_message`: The system message to use for text (clipboard) cleanup and post-processing. (Default: `You are a helpful assistant that cleans up selected text. Fix any spelling, grammar, or formatting issues while preserving the original meaning.`)
 
-When specifying a model, use the official model name as it's listed in the API provider's documentation - e.g. `gpt-4o-mini`, `claude-3-5-sonnet-latest`, `gemini-1.5-flash`, etc. For Ollama, you can find all model names in the [Ollama Library](https://ollama.com/library) page.
+When specifying a model, use the official model name as listed in the API provider's documentation. The dropdown offers the current OpenAI models, but it is editable, so any model your key can reach can be typed in. For Ollama, model names are in the [Ollama Library](https://ollama.com/library).
+
+**Which model for cleanup?** `gpt-5.6-luna` is the default because cleanup is a mechanical edit on the interactive path: you are watching for the text to appear, so latency dominates. On real Polish dictations it came back in about 2.8 s against 3.7 s for `gpt-5.4`, at roughly a twelfth of the price, with no measurable quality loss. Raise `cleanup_reasoning_effort` before reaching for a bigger model.
 
 #### Miscellaneous Options
 - `print_to_terminal`: Set to `true` to print the script status and transcribed text to the terminal. (Default: `true`)
@@ -261,20 +288,21 @@ When specifying a model, use the official model name as it's listed in the API p
 
 If any of the configuration options are invalid or not provided, the program will use the default values.
 
-### Azure OpenAI Setup
+### Azure OpenAI / Microsoft Foundry Setup
 
-To use Azure OpenAI with WhisperWriter, you'll need to:
+1. **Create the resource** in the Azure portal or in AI Foundry.
+2. **Deploy the models** you want: a transcription model (`gpt-transcribe` is recommended) and, for post-processing, a chat/reasoning model (`gpt-5.6-luna`).
+3. **Configure the transcription side** (Transcription tab):
+   - `provider`: `azure_openai`
+   - `azure_openai_api_key` and `azure_openai_endpoint` — any of the three hostname forms works, including the Foundry `https://NAME.services.ai.azure.com`
+   - `azure_openai_deployment_name`: your deployment name, e.g. `gpt-transcribe-global`
+   - leave `azure_api_mode` on `legacy` (see the note below)
+4. **Configure the post-processing side** (LLM cleanup tab): the same endpoint and key, plus the cleanup and instruction deployment names. `azure_api_mode` there stays on `v1`.
 
-1. **Create an Azure OpenAI resource** in the Azure portal
-2. **Deploy a Whisper model** in your Azure OpenAI resource
-3. **Configure WhisperWriter** with your Azure OpenAI credentials:
-   - Set `provider` to `azure_openai`
-   - Set `azure_openai_api_key` to your Azure OpenAI API key
-   - Set `azure_openai_endpoint` to your Azure OpenAI endpoint URL (e.g., `https://your-resource.openai.azure.com`)
-   - Set `azure_openai_deployment_name` to your Whisper model deployment name
-   - Optionally set `azure_openai_api_version` (defaults to `2024-02-01`)
+Two Azure specifics worth knowing, both verified against a live resource:
 
-The model name should typically be `whisper-1` unless you're using a custom deployment name.
+- **Audio does not work on the v1 API.** Azure answers `DeploymentNotFound` for `/openai/v1/audio/transcriptions` even for deployments that answer normally on the classic `/openai/deployments/<name>/audio/transcriptions` path. Transcription therefore defaults to `legacy` mode with a dated api-version, while chat and responses use `v1`.
+- **`gpt-transcribe` needs the plural `languages` field** and silently ignores the singular one, so a language hint set only in `language` is lost. WhisperWriter picks the right field per model automatically; the `azure_openai_model_family` setting exists for deployments whose name does not identify their model.
 
 Check out the [CHANGELOG](CHANGELOG.md) for more details on what's been added and changed.
 

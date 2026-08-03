@@ -134,6 +134,11 @@ dmypy.json
 
 # Configuration files
 config.yaml
+# Backups of the user config carry the same private endpoints as the config itself.
+config.yaml.bak*
+config.yaml.*.bak
+# Local backups made before editing a tracked prompt or rules file.
+*.bak
 
 # Keyring and credentials
 *.keyring
@@ -144,6 +149,7 @@ config.yaml
 # VS Code workspace files
 *.code-workspace
 
-# Prompts
+# Prompts. These are personal: they carry the author's own domain terms and
+# working style, and the app reads them from a path in the settings, so they do
+# not belong in the repository. Ship defaults through config_schema.yaml instead.
 *.txt
-!clenup prompt.txt

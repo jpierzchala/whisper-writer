@@ -1,30 +1,57 @@
 import os
 import sys
-from dotenv import set_key, load_dotenv
+from collections import OrderedDict
+
+from dotenv import load_dotenv
 from PyQt5 import QtWidgets
 from PyQt5.QtWidgets import (
-    QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
-    QMessageBox, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog, QTextEdit, QSpinBox, QScrollArea
+    QApplication, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QLabel, QLineEdit,
+    QPushButton, QComboBox, QCheckBox, QMessageBox, QTabWidget, QWidget, QSizePolicy,
+    QSpacerItem, QToolButton, QStyle, QFileDialog, QTextEdit, QSpinBox, QDoubleSpinBox,
+    QScrollArea
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal, QMetaObject, QThread, QTimer
-from PyQt5.QtGui import QFont, QIntValidator
+from PyQt5.QtGui import QFont
 import sounddevice as sd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow, QT_WIDGETS_ARE_MOCKED
+from ui.theme import apply_theme
 from utils import ConfigManager
 from keyring_manager import KeyringManager
 from llm_processor import LLMProcessor
+from model_registry import is_reasoning_model
 from ui.model_refresh_worker import ModelRefreshWorker
 from whisper_languages import WHISPER_LANGUAGE_CHOICES, normalize_whisper_language
 
-TEXT_INPUT_WIDGET_TYPES = tuple(
-    widget_type for widget_type in (QLineEdit, QComboBox, QTextEdit, QSpinBox)
-    if isinstance(widget_type, type)
-)
 QWIDGET_IS_TYPE = isinstance(QWidget, type)
-QLINEEDIT_IS_TYPE = isinstance(QLineEdit, type)
-REASONING_MODEL_PREFIXES = ('gpt-5', 'o1')
+# Models offered in the cleanup/instruction dropdowns, best default first. Kept to
+# models that are current on both OpenAI and Azure as of July 2026; the combo is
+# editable so anything else can still be typed in.
+CURATED_LLM_MODELS = (
+    'gpt-5.6-luna',
+    'gpt-5.6-terra',
+    'gpt-5.6-sol',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.2',
+)
+
+# Single source of truth mapping a secret config key to its keyring entry name.
+# Keyed by (category, key) because the same key name can appear in several sections.
+KEYRING_SERVICE_BY_CONFIG_KEY = {
+    ('model_options', 'openai_transcription_api_key'): 'openai_transcription',
+    ('model_options', 'deepgram_transcription_api_key'): 'deepgram_transcription',
+    ('model_options', 'groq_transcription_api_key'): 'groq_transcription',
+    ('model_options', 'azure_openai_api_key'): 'azure_openai_transcription',
+    ('llm_post_processing', 'claude_api_key'): 'claude',
+    ('llm_post_processing', 'openai_api_key'): 'openai_llm',
+    ('llm_post_processing', 'azure_openai_llm_api_key'): 'azure_openai_llm',
+    ('llm_post_processing', 'gemini_api_key'): 'gemini',
+    ('llm_post_processing', 'groq_api_key'): 'groq',
+}
+KEYRING_SERVICE_BY_KEY = {key: name for (_, key), name in KEYRING_SERVICE_BY_CONFIG_KEY.items()}
+
 API_TYPE_LABELS = {
     'openai': 'OpenAI API',
     'azure_openai': 'Azure OpenAI',
@@ -42,14 +69,16 @@ class SettingsWindow(BaseWindow):
 
     def __init__(self):
         """Initialize the settings window."""
-        super().__init__('Settings', 800, 800)  # Reduced height from 1050 to 800
+        super().__init__('Settings', 860, 720)
         ConfigManager.initialize()
         self.schema = ConfigManager.get_schema()
         self.llm_processor = None  # Initialize to None
-        self.model_combo = None
         self.cleanup_model_combo = None
         self.instruction_model_combo = None
-        self.refresh_thread = None  # Add thread reference
+        self.refresh_thread = None  # Active model-refresh thread, if any
+        self.refresh_worker = None
+        # {objectName prefix: (form layout, row index)} so rows can be hidden wholesale
+        self.setting_rows = {}
         self.headless_mode = QT_WIDGETS_ARE_MOCKED
         if not self.headless_mode:
             self.init_settings_ui()
@@ -73,8 +102,8 @@ class SettingsWindow(BaseWindow):
 
     def init_settings_ui(self):
         """Initialize the settings user interface."""
+        apply_theme(self)
         self.tabs = QTabWidget()
-        self.tabs.setFont(QFont('Segoe UI', 11))
         self.main_layout.addWidget(self.tabs)
 
         self.create_tabs()
@@ -91,173 +120,148 @@ class SettingsWindow(BaseWindow):
         self.toggle_transcription_provider_options()
         self.update_temperature_visibility()
 
+    def _ordered_categories(self):
+        """Schema categories in display order, skipping metadata keys."""
+        categories = [
+            (category, settings) for category, settings in self.schema.items()
+            if not ConfigManager.is_schema_metadata(category)
+        ]
+        categories.sort(key=lambda item: (item[1].get('_ui') or {}).get('order', 999))
+        return categories
+
+    @staticmethod
+    def _category_settings(settings):
+        """Yield (key, meta, sub_category) for every setting in a category."""
+        for sub_category, sub_settings in settings.items():
+            if ConfigManager.is_schema_metadata(sub_category) or not isinstance(sub_settings, dict):
+                continue
+            if 'value' in sub_settings:
+                yield sub_category, sub_settings, None
+            else:
+                for key, meta in sub_settings.items():
+                    if not ConfigManager.is_schema_metadata(key):
+                        yield key, meta, sub_category
+
     def create_tabs(self):
-        """Create tabs for each category in the schema."""
-        for category, settings in self.schema.items():
+        """Create one tab per schema category, its settings grouped into sections."""
+        for category, settings in self._ordered_categories():
             tab = QWidget()
-            
-            # Create a scroll area for the tab content
+
             scroll_area = QScrollArea()
             scroll_area.setWidgetResizable(True)
             scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            
-            # Create a container widget for the scroll area
+
             scroll_content = QWidget()
-            tab_layout = QVBoxLayout()
-            scroll_content.setLayout(tab_layout)
-            
-            # Add the settings widgets to the scroll content
+            tab_layout = QVBoxLayout(scroll_content)
+            tab_layout.setContentsMargins(4, 4, 4, 4)
+            tab_layout.setSpacing(4)
+
             self.create_settings_widgets(tab_layout, category, settings)
-            
-            # Add spacer at the bottom
-            tab_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-            
-            # Set the scroll content as the widget for the scroll area
+
+            tab_layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Minimum, QSizePolicy.Expanding))
             scroll_area.setWidget(scroll_content)
-            
-            # Create a layout for the tab to hold the scroll area
-            main_tab_layout = QVBoxLayout()
+
+            main_tab_layout = QVBoxLayout(tab)
+            main_tab_layout.setContentsMargins(4, 8, 4, 4)
             main_tab_layout.addWidget(scroll_area)
-            tab.setLayout(main_tab_layout)
-            
-            self.tabs.addTab(tab, category.replace('_', ' ').capitalize())
+
+            ui_meta = settings.get('_ui') or {}
+            self.tabs.addTab(tab, ui_meta.get('title') or category.replace('_', ' ').capitalize())
 
     def create_settings_widgets(self, layout, category, settings):
-        """Create widgets for each setting in a category."""
-        for sub_category, sub_settings in settings.items():
-            if isinstance(sub_settings, dict):
-                if 'value' in sub_settings:
-                    # This is a direct setting
-                    self.add_setting_widget(layout, sub_category, sub_settings, category)
-                else:
-                    # This is a subcategory with multiple settings
-                    for key, meta in sub_settings.items():
-                        self.add_setting_widget(layout, key, meta, category, sub_category)
+        """Lay a category out as titled sections, one per `group` in the schema."""
+        grouped = OrderedDict()
+        for key, meta, sub_category in self._category_settings(settings):
+            grouped.setdefault(meta.get('group') or 'Options', []).append((key, meta, sub_category))
+
+        for group_name, entries in grouped.items():
+            group_box = QGroupBox(group_name)
+            # A vertical stack of row widgets rather than a QFormLayout: hidden rows
+            # then collapse completely, whereas a form layout keeps their spacing and
+            # leaves visible gaps wherever provider-specific fields are hidden.
+            group_layout = QVBoxLayout(group_box)
+            group_layout.setContentsMargins(6, 6, 6, 2)
+            group_layout.setSpacing(8)
+
+            for key, meta, sub_category in entries:
+                self.add_setting_widget(group_layout, key, meta, category, sub_category)
+
+            layout.addWidget(group_box)
 
     def create_buttons(self):
         """Create reset and save buttons."""
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 6, 0, 0)
+        button_row.addStretch(1)
+
         reset_button = QPushButton('Reset to saved settings')
-        reset_button.setFont(QFont('Segoe UI', 11))
         reset_button.clicked.connect(self.reset_settings)
-        self.main_layout.addWidget(reset_button)
+        button_row.addWidget(reset_button)
 
         save_button = QPushButton('Save')
-        save_button.setFont(QFont('Segoe UI', 11))
+        save_button.setProperty('role', 'primary')
+        save_button.setDefault(True)
         save_button.clicked.connect(self.save_settings)
-        self.main_layout.addWidget(save_button)
+        button_row.addWidget(save_button)
 
-    def add_setting_widget(self, layout, key, meta, category, sub_category=None):
-        """Add a setting widget to the layout."""
-        item_layout = QHBoxLayout()
-        widget = None
-        
-        # Special handling for volume reduction to add % symbol
-        if key == 'recording_volume_reduction':
-            label = QLabel("Recording Volume Reduction:")
-            widget = QLineEdit()
-            widget.setText(str(meta.get('value', 0)))
-            widget.setValidator(QIntValidator(0, 100))  # Only allow integers 0-100
-            widget.setPlaceholderText("0-100")
-            widget.setToolTip("Reduce system audio volume by this percentage during recording\n"
-                             "0% means no reduction\n"
-                             "50% means reduce current volume by half\n"
-                             "100% means mute audio")
-            # Add % label after the input
-            percent_label = QLabel("%")
-            percent_label.setFont(QFont('Segoe UI', 11))
-            item_layout.addWidget(percent_label)
-        # Special handling for model fields to clarify their purpose
-        elif category == 'llm_post_processing':
-            if key == 'model':
-                label = QLabel("Cleanup Model:")  # Changed from just "Model:"
-            elif key == 'instruction_model':
-                label = QLabel("Instruction Model:")
-            elif key == 'azure_openai_llm_cleanup_deployment_name':
-                label = QLabel("Azure Cleanup Deployment:")
-            elif key == 'azure_openai_llm_instruction_deployment_name':
-                label = QLabel("Azure Instruction Deployment:")
-            elif key == 'azure_openai_llm_deployment_name':
-                label = QLabel("Azure Deployment (legacy fallback):")
-            else:
-                label = QLabel(f"{key.replace('_', ' ').capitalize()}:")
-        else:
-            label = QLabel(f"{key.replace('_', ' ').capitalize()}:")
-        
-        # Create widget if not already created
+        self.main_layout.addLayout(button_row)
+
+    LABEL_COLUMN_WIDTH = 190
+
+    def add_setting_widget(self, group_layout, key, meta, category, sub_category=None):
+        """Add one setting as a labelled row inside a group."""
         widget = self.create_widget_for_type(key, meta, category, sub_category)
         if not widget:
             return
 
-        # Set larger font for the widget if it's a text-based widget
-        if TEXT_INPUT_WIDGET_TYPES and isinstance(widget, TEXT_INPUT_WIDGET_TYPES):
-            widget.setFont(QFont('Segoe UI', 11))
-        elif not TEXT_INPUT_WIDGET_TYPES and hasattr(widget, 'setFont'):
-            widget.setFont(QFont('Segoe UI', 11))
+        prefix = f"{category}_{sub_category}_{key}" if sub_category else f"{category}_{key}"
+        description = meta.get('description', '')
 
-        label.setFont(QFont('Segoe UI', 11))
-        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        label_text = meta.get('label') or key.replace('_', ' ').capitalize()
+        label = QLabel(f"{label_text}:")
+        label.setObjectName(f"{prefix}_label")
+        label.setProperty('role', 'settingLabel')
+        label.setWordWrap(True)
+        # A fixed label column keeps the fields aligned down the whole tab.
+        label.setFixedWidth(self.LABEL_COLUMN_WIDTH)
+        label.setToolTip(description)
 
-        help_button = self.create_help_button(meta.get('description', ''))
+        help_button = self.create_help_button(description)
+        help_button.setObjectName(f"{prefix}_help")
 
-        item_layout.addWidget(label)
-        item_layout.addWidget(widget)
-        item_layout.addWidget(help_button)
-        layout.addLayout(item_layout)
+        row = QWidget()
+        row.setObjectName(f"{prefix}_row")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        row_layout.addWidget(label, 0, Qt.AlignTop)
+        row_layout.addWidget(widget, 1)
+        row_layout.addWidget(help_button, 0, Qt.AlignTop)
 
-        # Set object names for the widget, label, and help button
-        widget_name = f"{category}_{sub_category}_{key}_input" if sub_category else f"{category}_{key}_input"
-        label_name = f"{category}_{sub_category}_{key}_label" if sub_category else f"{category}_{key}_label"
-        help_name = f"{category}_{sub_category}_{key}_help" if sub_category else f"{category}_{key}_help"
-        
-        label.setObjectName(label_name)
-        help_button.setObjectName(help_name)
-        
         is_widget_like = QWIDGET_IS_TYPE and isinstance(widget, QWidget)
-        if not is_widget_like and not QWIDGET_IS_TYPE and hasattr(widget, 'setObjectName'):
+        if not is_widget_like and hasattr(widget, 'setObjectName'):
             is_widget_like = True
-        
+
         if is_widget_like:
-            widget.setObjectName(widget_name)
+            widget.setObjectName(f"{prefix}_input")
         else:
-            # If it's a layout (for model_path), set the object name on the QLineEdit
-            layout = widget.layout() if hasattr(widget, 'layout') else None
-            line_edit = layout.itemAt(0).widget() if layout and layout.count() else None
-            if QLINEEDIT_IS_TYPE and isinstance(line_edit, QLineEdit):
-                line_edit.setObjectName(widget_name)
-            elif not QLINEEDIT_IS_TYPE and hasattr(line_edit, 'setObjectName'):
-                line_edit.setObjectName(widget_name)
+            inner = widget.layout() if hasattr(widget, 'layout') else None
+            line_edit = inner.itemAt(0).widget() if inner and inner.count() else None
+            if line_edit is not None and hasattr(line_edit, 'setObjectName'):
+                line_edit.setObjectName(f"{prefix}_input")
+
+        group_layout.addWidget(row)
+        self.setting_rows[prefix] = row
 
     def create_widget_for_type(self, key, meta, category, sub_category):
         """Create a widget based on the meta type."""
         meta_type = meta.get('type')
         current_value = self.get_config_value(category, sub_category, key, meta)
 
-        # Special handling for find replace file
-        if category == 'post_processing' and key == 'find_replace_file':
-            container = QWidget()
-            layout = QHBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            
-            file_edit = QLineEdit()
-            file_edit.setFont(QFont('Segoe UI', 11))
-            file_edit.setPlaceholderText("Select find/replace rules file...")
-            if current_value:
-                file_edit.setText(current_value)
-            
-            browse_button = QPushButton('Browse')
-            browse_button.setFont(QFont('Segoe UI', 11))
-            browse_button.clicked.connect(lambda: self.browse_find_replace_file(file_edit))
-            
-            layout.addWidget(file_edit)
-            layout.addWidget(browse_button)
-            
-            return container
-
         # Special handling for sound device selection
         if category == 'recording_options' and key == 'sound_device':
             combo = QComboBox()
-            combo.setFont(QFont('Segoe UI', 11))
             devices = self.get_available_sound_devices()
             default_index = None  # Initialize default_index
             
@@ -280,42 +284,11 @@ class SettingsWindow(BaseWindow):
                 
             return combo
 
+        if meta.get('widget') == 'prompt':
+            return self.create_prompt_editor(key, current_value)
+
         if category == 'llm_post_processing':
-            if key in ['text_cleanup_system_message', 'instruction_system_message', 'system_prompt']:
-                container = QWidget()
-                layout = QVBoxLayout()
-                container.setLayout(layout)
-                
-                # Text edit for system message
-                text_edit = QTextEdit()
-                text_edit.setPlaceholderText(f"Enter system message for {key.replace('_', ' ')}")
-                text_edit.setText(current_value or '')
-                text_edit.setMinimumHeight(100)
-                text_edit.setFont(QFont('Segoe UI', 11))
-                
-                # File path selection
-                file_layout = QHBoxLayout()
-                file_edit = QLineEdit()
-                file_edit.setPlaceholderText("Optional: Path to system message file")
-                file_edit.setObjectName(f"{key}_file_path")
-                
-                # Load the saved file path
-                saved_file_path = ConfigManager.get_config_value("llm_post_processing", f"{key}_file_path")
-                if saved_file_path:
-                    file_edit.setText(saved_file_path)
-                
-                browse_btn = QPushButton("Browse")
-                browse_btn.clicked.connect(lambda: self.browse_system_message_file(file_edit, text_edit))
-                
-                file_layout.addWidget(file_edit)
-                file_layout.addWidget(browse_btn)
-                
-                layout.addWidget(text_edit)
-                layout.addLayout(file_layout)
-                
-                return container
-            
-            elif key == 'api_type':
+            if key == 'api_type':
                 combo = QComboBox()
                 combo.setObjectName('llm_post_processing_api_type_input')
                 for option in meta['options']:
@@ -330,14 +303,19 @@ class SettingsWindow(BaseWindow):
                 return combo
             elif key in ['cleanup_model', 'instruction_model']:
                 return self._create_model_combobox(key, current_value)
-            elif key == 'model':
-                widget = QLineEdit(current_value or '')
-                widget.setObjectName('llm_post_processing_model_input')
-                widget.setPlaceholderText("Enter model name (e.g. gpt-4o-mini for OpenAI, llama3.2 for Ollama)")
-                return widget
 
         if category == 'model_options' and sub_category == 'common' and key == 'language':
             return self.create_combobox(current_value, WHISPER_LANGUAGE_CHOICES)
+
+        if meta.get('widget') == 'file':
+            return self.create_file_picker(current_value, meta)
+
+        if meta.get('widget') == 'multiline':
+            text_edit = QTextEdit()
+            text_edit.setPlainText(current_value or '')
+            text_edit.setMinimumHeight(120)
+            text_edit.setAcceptRichText(False)
+            return text_edit
 
         if meta_type == 'bool':
             return self.create_checkbox(current_value, key)
@@ -351,8 +329,97 @@ class SettingsWindow(BaseWindow):
             is_api_key = key.endswith('api_key')
             return self.create_line_edit(current_value, key, is_api_key)
         elif meta_type in ['int', 'float']:
-            return self.create_line_edit(str(current_value))
+            return self.create_number_input(current_value, meta)
         return None
+
+    @staticmethod
+    def create_number_input(value, meta):
+        """Spin box for a numeric setting, so bad input cannot be typed at all."""
+        is_float = meta.get('type') == 'float'
+        spin = QDoubleSpinBox() if is_float else QSpinBox()
+
+        default = meta.get('value') or 0
+        # Numeric bounds are advisory: keep any value already in the config reachable.
+        minimum = meta.get('min', 0)
+        maximum = meta.get('max', max(default * 100, 1000000))
+        current = value if value is not None else default
+        try:
+            current = float(current) if is_float else int(current)
+        except (TypeError, ValueError):
+            current = default
+
+        spin.setRange(min(minimum, current), max(maximum, current))
+        if is_float:
+            spin.setDecimals(meta.get('decimals', 2))
+        spin.setSingleStep(meta.get('step', 0.1 if is_float else 1))
+        if meta.get('suffix'):
+            spin.setSuffix(meta['suffix'])
+        spin.setValue(current)
+        spin.setMinimumWidth(130)
+        return spin
+
+    def create_prompt_editor(self, key, current_value):
+        """Editor for a system prompt: inline text plus an optional companion file.
+
+        The file is appended to the inline text and re-read on every dictation, so
+        prompts can be iterated on without restarting the app.
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText("System prompt…")
+        text_edit.setPlainText(current_value or '')
+        text_edit.setMinimumHeight(110)
+        text_edit.setAcceptRichText(False)
+
+        file_row = QHBoxLayout()
+        file_row.setContentsMargins(0, 0, 0, 0)
+        file_row.setSpacing(6)
+
+        file_edit = QLineEdit()
+        file_edit.setPlaceholderText("Optional: file appended to the prompt above")
+        file_edit.setObjectName(f"{key}_file_path")
+        saved_file_path = ConfigManager.get_config_value("llm_post_processing", f"{key}_file_path")
+        if saved_file_path:
+            file_edit.setText(saved_file_path)
+
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(lambda: self.browse_system_message_file(file_edit, text_edit))
+
+        file_row.addWidget(file_edit, 1)
+        file_row.addWidget(browse_button, 0)
+
+        layout.addWidget(text_edit)
+        layout.addLayout(file_row)
+        return container
+
+    def create_file_picker(self, current_value, meta):
+        """Line edit plus a Browse button for a path setting."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        file_edit = QLineEdit(current_value or '')
+        file_edit.setPlaceholderText(meta.get('placeholder') or "Select a file…")
+
+        browse_button = QPushButton('Browse')
+        browse_button.clicked.connect(lambda: self.browse_into(file_edit))
+
+        layout.addWidget(file_edit, 1)
+        layout.addWidget(browse_button, 0)
+        return container
+
+    def browse_into(self, file_edit):
+        """Pick a file and put its path into `file_edit`."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select File", "", "Text Files (*.txt *.json *.log);;All Files (*)"
+        )
+        if file_path:
+            file_edit.setText(file_path)
 
     def create_checkbox(self, value, key):
         checkbox_class = getattr(QtWidgets, 'QCheckBox', QCheckBox)
@@ -404,19 +471,12 @@ class SettingsWindow(BaseWindow):
 
     @staticmethod
     def _default_llm_model_choices():
-        """Return a curated list of OpenAI model IDs for quick selection."""
-        return [
-            'gpt-5.4',
-            'gpt-5.3-chat-latest',
-            'gpt-5.2',
-            'gpt-5.1',
-            'gpt-5.1-mini',
-            'gpt-4.1',
-            'gpt-4.1-mini',
-            'gpt-4o',
-            'gpt-4o-mini',
-            'gpt-3.5-turbo'
-        ]
+        """Currently supported OpenAI model IDs, best default first.
+
+        Retired and deprecated models are deliberately absent: the combo stays
+        editable, so anything omitted here can still be typed in by hand.
+        """
+        return list(CURATED_LLM_MODELS)
 
     def create_combobox(self, value, options):
         widget = QComboBox()
@@ -451,25 +511,9 @@ class SettingsWindow(BaseWindow):
         
         if password_mode:
             widget.setEchoMode(QLineEdit.Password)
-            # Load appropriate API key from keyring
-            if key == 'openai_transcription_api_key':
-                widget.setText(KeyringManager.get_api_key("openai_transcription") or value)
-            elif key == 'deepgram_transcription_api_key':
-                widget.setText(KeyringManager.get_api_key("deepgram_transcription") or value)
-            elif key == 'groq_transcription_api_key':
-                widget.setText(KeyringManager.get_api_key("groq_transcription") or value)
-            elif key == 'azure_openai_api_key':
-                widget.setText(KeyringManager.get_api_key("azure_openai_transcription") or value)
-            elif key == 'azure_openai_llm_api_key':
-                widget.setText(KeyringManager.get_api_key("azure_openai_llm") or value)
-            elif key == 'claude_api_key':
-                widget.setText(KeyringManager.get_api_key("claude") or value)
-            elif key == 'openai_api_key':
-                widget.setText(KeyringManager.get_api_key("openai_llm") or value)
-            elif key == 'gemini_api_key':
-                widget.setText(KeyringManager.get_api_key("gemini") or value)
-            elif key == 'groq_api_key':
-                widget.setText(KeyringManager.get_api_key("groq") or value)
+            keyring_name = KEYRING_SERVICE_BY_KEY.get(key)
+            if keyring_name:
+                widget.setText(KeyringManager.get_api_key(keyring_name) or value)
         elif key == 'model_path':
             widget.setPlaceholderText("Optional: Path to local model file")
         
@@ -490,8 +534,10 @@ class SettingsWindow(BaseWindow):
 
     def get_config_value(self, category, sub_category, key, meta):
         if sub_category:
-            return ConfigManager.get_config_value(category, sub_category, key) or meta['value']
-        return ConfigManager.get_config_value(category, key) or meta['value']
+            value = ConfigManager.get_config_value(category, sub_category, key)
+        else:
+            value = ConfigManager.get_config_value(category, key)
+        return value if value is not None else meta['value']
 
     def browse_model_path(self, widget):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Whisper Model File", "", "Model Files (*.bin);;All Files (*)")
@@ -507,38 +553,11 @@ class SettingsWindow(BaseWindow):
         ConfigManager.console_print("Saving settings...")
         self.iterate_settings(self.save_setting)
 
-        # Save API keys to keyring
-        openai_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'openai_transcription_api_key') or ''
-        deepgram_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'deepgram_transcription_api_key') or ''
-        groq_transcription_key = ConfigManager.get_config_value('model_options', 'api', 'groq_transcription_api_key') or ''
-        azure_openai_key = ConfigManager.get_config_value('model_options', 'api', 'azure_openai_api_key') or ''
-        claude_api_key = ConfigManager.get_config_value('llm_post_processing', 'claude_api_key') or ''
-        openai_llm_key = ConfigManager.get_config_value('llm_post_processing', 'openai_api_key') or ''
-        azure_openai_llm_key = ConfigManager.get_config_value('llm_post_processing', 'azure_openai_llm_api_key') or ''
-        gemini_api_key = ConfigManager.get_config_value('llm_post_processing', 'gemini_api_key') or ''
-        groq_api_key = ConfigManager.get_config_value('llm_post_processing', 'groq_api_key') or ''
-        
-        # Save to keyring
-        KeyringManager.save_api_key("openai_transcription", openai_transcription_key)
-        KeyringManager.save_api_key("deepgram_transcription", deepgram_transcription_key)
-        KeyringManager.save_api_key("groq_transcription", groq_transcription_key)
-        KeyringManager.save_api_key("azure_openai_transcription", azure_openai_key)
-        KeyringManager.save_api_key("claude", claude_api_key)
-        KeyringManager.save_api_key("openai_llm", openai_llm_key)
-        KeyringManager.save_api_key("azure_openai_llm", azure_openai_llm_key)
-        KeyringManager.save_api_key("gemini", gemini_api_key)
-        KeyringManager.save_api_key("groq", groq_api_key)
-        
-        # Remove API keys from config
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'openai_transcription_api_key')
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'deepgram_transcription_api_key')
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'groq_transcription_api_key')
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'azure_openai_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'claude_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'openai_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'azure_openai_llm_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'gemini_api_key')
-        ConfigManager.set_config_value(None, 'llm_post_processing', 'groq_api_key')
+        # Move secrets from the config into the keyring, then blank them in the config
+        for (category, key), keyring_name in KEYRING_SERVICE_BY_CONFIG_KEY.items():
+            path = (category, 'api', key) if category == 'model_options' else (category, key)
+            KeyringManager.save_api_key(keyring_name, ConfigManager.get_config_value(*path) or '')
+            ConfigManager.set_config_value(None, *path)
 
         ConfigManager.save_config()
         
@@ -560,41 +579,21 @@ class SettingsWindow(BaseWindow):
     def save_setting(self, widget, category, sub_category, key, meta):
         """Save a single setting to the config."""
         if isinstance(widget, QWidget) and widget.layout():
-            layout = widget.layout()
-            text_edit = None
-            file_edit = None
-            
-            # Find both the text edit and file edit widgets
-            for i in range(layout.count()):
-                item = layout.itemAt(i)
-                if isinstance(item.widget(), QTextEdit):
-                    text_edit = item.widget()
-                elif isinstance(item.widget(), QLineEdit):  # Direct QLineEdit check
-                    file_edit = item.widget()
-                elif isinstance(item.layout(), QHBoxLayout):
-                    for j in range(item.layout().count()):
-                        file_widget = item.layout().itemAt(j).widget()
-                        if isinstance(file_widget, QLineEdit):
-                            file_edit = file_widget
-                            break
-            
-            # Save both the text content and file path
-            if text_edit:
-                value = text_edit.toPlainText()
-                ConfigManager.console_print(f"Saving {category}.{key} with value: {value}")
-                ConfigManager.set_config_value(value, category, key)
-            
-            if file_edit:
-                file_path = file_edit.text()
-                if category == 'post_processing' and key == 'find_replace_file':
-                    # Direct save for find/replace file path
-                    ConfigManager.console_print(f"Saving {category}.{key} with value: {file_path}")
-                    ConfigManager.set_config_value(file_path, category, key)
+            text_edit, file_edit = self._find_composite_editors(widget.layout())
+
+            # A prompt editor holds the prompt itself plus an optional companion
+            # file; a plain file picker holds only a path, which IS the setting.
+            if text_edit is not None:
+                ConfigManager.set_config_value(text_edit.toPlainText(), category, key)
+                if file_edit is not None:
+                    ConfigManager.set_config_value(file_edit.text(), category, f"{key}_file_path")
+            elif file_edit is not None:
+                # Empty means "not set", stored as null like every other str setting.
+                path = file_edit.text() or None
+                if sub_category:
+                    ConfigManager.set_config_value(path, category, sub_category, key)
                 else:
-                    # For other file paths that use the _file_path suffix
-                    ConfigManager.console_print(f"Saving {category}.{key}_file_path with value: {file_path}")
-                    ConfigManager.set_config_value(file_path, category, f"{key}_file_path")
-            
+                    ConfigManager.set_config_value(path, category, key)
             return
 
         # Special handling for sound device combo box
@@ -610,6 +609,24 @@ class SettingsWindow(BaseWindow):
         else:
             ConfigManager.set_config_value(value, category, key)
 
+    @staticmethod
+    def _find_composite_editors(layout):
+        """Find the text edit and/or line edit inside a composite setting widget."""
+        text_edit = None
+        file_edit = None
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget()
+            if isinstance(widget, QTextEdit):
+                text_edit = widget
+            elif isinstance(widget, QLineEdit):
+                file_edit = file_edit or widget
+            elif item.layout() is not None:
+                nested_text, nested_file = SettingsWindow._find_composite_editors(item.layout())
+                text_edit = text_edit or nested_text
+                file_edit = file_edit or nested_file
+        return text_edit, file_edit
+
     def reset_settings(self):
         """Reset the settings to the saved values."""
         ConfigManager.reload_config()
@@ -618,59 +635,42 @@ class SettingsWindow(BaseWindow):
     def update_widgets_from_config(self):
         """Update all widgets with values from the current configuration."""
         ConfigManager.console_print("Updating widgets from config...")
-        
-        # Load API keys from keyring
-        whisper_key = KeyringManager.get_api_key("whisper")
-        claude_key = KeyringManager.get_api_key("claude")
-        openai_key = KeyringManager.get_api_key("openai_llm")
-        gemini_key = KeyringManager.get_api_key("gemini")
-        groq_key = KeyringManager.get_api_key("groq")
-        
-        ConfigManager.console_print("Loading API keys from keyring...")
-        
+
         self.iterate_settings(self.update_widget_value)
-        
-        # Update API key fields
-        for widget, category, sub_category, key, _ in self.iterate_settings():
-            if category == 'model_options' and sub_category == 'api' and key == 'api_key':
-                widget.setText(whisper_key)
-                ConfigManager.console_print("Set Whisper API key widget")
-            elif category == 'llm_post_processing':
-                if key == 'claude_api_key':
-                    widget.setText(claude_key)
-                    ConfigManager.console_print("Set Claude API key widget")
-                elif key == 'openai_api_key':
-                    widget.setText(openai_key)
-                    ConfigManager.console_print("Set OpenAI LLM key widget")
-                elif key == 'gemini_api_key':
-                    widget.setText(gemini_key)
-                    ConfigManager.console_print("Set Gemini API key widget")    
-                elif key == 'groq_api_key':
-                    widget.setText(groq_key)
-                    ConfigManager.console_print("Set Groq API key widget")
+
+        # Secret fields are not stored in the config file, so refill them from the keyring
+        for widget, category, sub_category, key, _ in self.iter_setting_widgets():
+            keyring_name = KEYRING_SERVICE_BY_CONFIG_KEY.get((category, key))
+            if keyring_name and hasattr(widget, 'setText'):
+                widget.setText(KeyringManager.get_api_key(keyring_name) or '')
 
     def update_widget_value(self, widget, category, sub_category, key, meta):
         """Update a single widget with its value from the config."""
-        # Skip API key fields as they're handled separately
-        if (category == 'model_options' and sub_category == 'api' and key == 'api_key') or \
-           (category == 'llm_post_processing' and key == 'api_key'):
+        # Skip API key fields as they're refilled from the keyring separately
+        if (category, key) in KEYRING_SERVICE_BY_CONFIG_KEY:
             return
-        
+
         value = self.get_config_value(category, sub_category, key, meta)
         self.set_widget_value(widget, value, meta.get('type'))
 
     def set_widget_value(self, widget, value, value_type):
         """Set the value of the widget."""
         if isinstance(widget, QCheckBox):
-            widget.setChecked(value)
+            widget.setChecked(bool(value))
         elif isinstance(widget, QComboBox):
             self._set_combobox_value(widget, value)
+        elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            if value is not None:
+                try:
+                    widget.setValue(float(value) if isinstance(widget, QDoubleSpinBox) else int(value))
+                except (TypeError, ValueError):
+                    pass
         elif isinstance(widget, QLineEdit):
             widget.setText(str(value) if value is not None else '')
-        elif isinstance(widget, QTextEdit):  # Add handling for QTextEdit
-            widget.setText(str(value) if value is not None else '')
+        elif isinstance(widget, QTextEdit):
+            widget.setPlainText(str(value) if value is not None else '')
         elif isinstance(widget, QWidget) and widget.layout():
-            # This is for the model_path widget
+            # Composite rows (file pickers, model_path) keep the path in a line edit.
             line_edit = widget.layout().itemAt(0).widget()
             if isinstance(line_edit, QLineEdit):
                 line_edit.setText(str(value) if value is not None else '')
@@ -681,6 +681,8 @@ class SettingsWindow(BaseWindow):
             return widget.isChecked()
         elif isinstance(widget, QComboBox):
             return self._get_combobox_value(widget)
+        elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            return widget.value()
         elif isinstance(widget, QLineEdit):
             text = widget.text()
             if value_type == 'int':
@@ -689,10 +691,9 @@ class SettingsWindow(BaseWindow):
                 return float(text) if text else None
             else:
                 return text or None
-        elif isinstance(widget, QTextEdit):  # Add handling for QTextEdit
+        elif isinstance(widget, QTextEdit):
             return widget.toPlainText() or None
         elif isinstance(widget, QWidget) and widget.layout():
-            # This is for the model_path widget
             line_edit = widget.layout().itemAt(0).widget()
             if isinstance(line_edit, QLineEdit):
                 return line_edit.text() or None
@@ -720,10 +721,8 @@ class SettingsWindow(BaseWindow):
 
     @staticmethod
     def _is_reasoning_model(value: str) -> bool:
-        if not value:
-            return False
-        lowered = value.strip().lower()
-        return any(lowered.startswith(prefix) for prefix in REASONING_MODEL_PREFIXES)
+        """True when the model takes a reasoning effort instead of a temperature."""
+        return bool(value) and is_reasoning_model(value)
 
     @staticmethod
     def _get_combobox_value(combo: QComboBox | None):
@@ -751,19 +750,19 @@ class SettingsWindow(BaseWindow):
             if help_button:
                 help_button.setVisible(use_api if sub_category == 'api' else not use_api)
 
+    def iter_setting_widgets(self):
+        """Yield (widget, category, sub_category, key, meta) for every settings widget."""
+        for category, settings in self._ordered_categories():
+            for key, meta, sub_category in self._category_settings(settings):
+                prefix = f"{category}_{sub_category}_{key}" if sub_category else f"{category}_{key}"
+                widget = self.findChild(QWidget, f"{prefix}_input")
+                if widget:
+                    yield widget, category, sub_category, key, meta
+
     def iterate_settings(self, func):
         """Iterate over all settings and apply a function to each."""
-        for category, settings in self.schema.items():
-            for sub_category, sub_settings in settings.items():
-                if isinstance(sub_settings, dict) and 'value' in sub_settings:
-                    widget = self.findChild(QWidget, f"{category}_{sub_category}_input")
-                    if widget:
-                        func(widget, category, None, sub_category, sub_settings)
-                else:
-                    for key, meta in sub_settings.items():
-                        widget = self.findChild(QWidget, f"{category}_{sub_category}_{key}_input")
-                        if widget:
-                            func(widget, category, sub_category, key, meta)
+        for widget, category, sub_category, key, meta in self.iter_setting_widgets():
+            func(widget, category, sub_category, key, meta)
 
     def handleCloseButton(self):
         """Override base window close button handler to hide instead of close."""
@@ -776,197 +775,113 @@ class SettingsWindow(BaseWindow):
         self.settings_closed.emit()
         self.hide()
 
-    def load_settings(self):
-        """Load settings from config and keyring."""
-        # Get API keys from keyring
-        openai_transcription_key = KeyringManager.get_api_key("openai_transcription") or ''
-        deepgram_transcription_key = KeyringManager.get_api_key("deepgram_transcription") or ''
-        groq_transcription_key = KeyringManager.get_api_key("groq_transcription") or ''
-        claude_key = KeyringManager.get_api_key("claude") or ''
-        openai_key = KeyringManager.get_api_key("openai_llm") or ''
-        gemini_key = KeyringManager.get_api_key("gemini") or ''
-        groq_key = KeyringManager.get_api_key("groq") or ''
-
-        # Update API key fields
-        for widget, category, sub_category, key, _ in self.iterate_settings():
-            if category == 'model_options' and sub_category == 'api':
-                if key == 'openai_transcription_api_key':
-                    widget.setText(openai_transcription_key)
-                elif key == 'deepgram_transcription_api_key':
-                    widget.setText(deepgram_transcription_key)
-                elif key == 'groq_transcription_api_key':
-                    widget.setText(groq_transcription_key)
-            elif category == 'llm_post_processing':
-                if key == 'claude_api_key':
-                    widget.setText(claude_key)
-                elif key == 'openai_api_key':
-                    widget.setText(openai_key)
-                elif key == 'gemini_api_key':
-                    widget.setText(gemini_key)
-                elif key == 'groq_api_key':
-                    widget.setText(groq_key)
-
-    def create_model_selector(self):
-        """Create text fields for model selection."""
-        container = QWidget()
-        layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create the text fields
-        self.cleanup_model_input = QLineEdit()
-        self.cleanup_model_input.setObjectName('llm_post_processing_cleanup_model_input')
-        
-        self.instruction_model_input = QLineEdit()
-        self.instruction_model_input.setObjectName('llm_post_processing_instruction_model_input')
-        
-        # Add to layout
-        layout.addWidget(self.cleanup_model_input)
-        layout.addWidget(self.instruction_model_input)
-        
-        container.setLayout(layout)
-        return container
+    def closeEvent(self, event):
+        """Make sure a running model refresh cannot outlive the window."""
+        thread = self.refresh_thread
+        if thread and thread.isRunning():
+            thread.quit()
+            thread.wait(2000)
+        super().closeEvent(event)
 
     def refresh_model_choices(self, combo_box=None):
-        """Refresh the model choices based on the selected API type."""
-        ConfigManager.console_print("\n=== Starting Model Refresh ===")
-        ConfigManager.console_print(f"Combo box type: {type(combo_box)}")
-        
+        """Fetch the available models for the selected API type on a worker thread."""
         api_type_combo = self.findChild(QComboBox, 'llm_post_processing_api_type_input')
         if not api_type_combo:
             ConfigManager.console_print("Error: API type combo box not found")
             return
-            
+
         api_type = self._get_combobox_value(api_type_combo)
-        ConfigManager.console_print(f"Selected API type: {api_type}")
-        
-        # Initialize LLM processor if needed
+        ConfigManager.console_print(f"Refreshing model list for API type: {api_type}")
+
         if not self.llm_processor:
-            ConfigManager.console_print("Initializing LLM processor...")
             self.llm_processor = LLMProcessor(api_type=api_type)
         else:
             self.llm_processor.api_type = api_type
-        
-        # Find the combo boxes in the UI
-        cleanup_combo = self.findChild(QComboBox, 'llm_post_processing_cleanup_model_input')
-        instruction_combo = self.findChild(QComboBox, 'llm_post_processing_instruction_model_input')
-        
-        ConfigManager.console_print(f"Found cleanup combo: {cleanup_combo}")
-        ConfigManager.console_print(f"Found instruction combo: {instruction_combo}")
-        
-        # If a specific combo box was passed, only update that one
-        if combo_box and isinstance(combo_box, QComboBox):
-            combos_to_update = [combo_box]
-        else:
-            combos_to_update = []
-            if cleanup_combo:
-                combos_to_update.append(cleanup_combo)
-            if instruction_combo:
-                combos_to_update.append(instruction_combo)
-        
-        ConfigManager.console_print(f"Will update {len(combos_to_update)} combo boxes")
-        ConfigManager.console_print(f"Combo boxes to update: {[combo.objectName() for combo in combos_to_update]}")
-        
-        # Try fetching models
-        try:
-            models = self.llm_processor.get_available_models(api_type)
-            ConfigManager.console_print(f"Direct fetch results: {models}")
-            if models:
-                self.update_model_combos(models, combos_to_update)
-        except Exception as e:
-            ConfigManager.console_print(f"Error fetching models: {str(e)}")
 
-    def update_model_combos(self, models, combos_to_update):
-        """Update combo boxes with fetched models."""
-        ConfigManager.console_print("\n=== Updating Model Combos ===")
-        ConfigManager.console_print(f"Received models: {models}")
-        ConfigManager.console_print(f"Number of combos to update: {len(combos_to_update)}")
-        ConfigManager.console_print(f"Combo boxes to update: {[combo.objectName() for combo in combos_to_update]}")
-        
-        # Ensure we're on the main thread
-        if QThread.currentThread() != QApplication.instance().thread():
-            ConfigManager.console_print("Warning: Updating from background thread, moving to main thread")
-            QApplication.instance().processEvents()
-        
+        combos = self._model_combos()
+        if not combos:
+            return
+
+        # A refresh is already running; it will pick up the latest api_type when it finishes.
+        if self.refresh_thread is not None:
+            return
+
+        for combo in combos:
+            combo.setEnabled(False)
+            if combo.lineEdit():
+                combo.lineEdit().setPlaceholderText("Loading models…")
+
+        self.refresh_thread = QThread(self)
+        self.refresh_worker = ModelRefreshWorker(self.llm_processor, api_type)
+        self.refresh_worker.moveToThread(self.refresh_thread)
+        self.refresh_thread.started.connect(self.refresh_worker.run)
+        self.refresh_worker.finished.connect(self._on_models_fetched)
+        self.refresh_worker.finished.connect(self.refresh_thread.quit)
+        self.refresh_thread.finished.connect(self._on_refresh_thread_finished)
+        self.refresh_thread.start()
+
+    def _model_combos(self):
+        """Return the cleanup/instruction model combo boxes that exist in the UI."""
+        return [combo for combo in (self.cleanup_model_combo, self.instruction_model_combo) if combo]
+
+    def _on_refresh_thread_finished(self):
+        """Tear down the finished refresh thread so a later refresh can start."""
+        thread, self.refresh_thread = self.refresh_thread, None
+        self.refresh_worker = None
+        if thread:
+            thread.deleteLater()
+
+    def _on_models_fetched(self, models):
+        """Populate the model combos with the fetched list (runs on the UI thread)."""
+        api_type = self.llm_processor.api_type if self.llm_processor else None
+        options = list(models or [])
+        status = ''
+
+        if not options:
+            if api_type in ('openai', 'azure_openai'):
+                options = self._default_llm_model_choices()
+                status = "Could not fetch models – showing known model IDs"
+            elif api_type == 'ollama':
+                status = "No models found – is Ollama running?"
+            else:
+                status = "No models available – check the API key"
+            ConfigManager.console_print(f"Model refresh: {status or 'no models returned'}")
+
+        self.update_model_combos(options, self._model_combos(), status)
+
+    def update_model_combos(self, models, combos_to_update, status=''):
+        """Repopulate the given combo boxes, preserving each current selection."""
+        combo_options = [str(model) for model in (models or [])]
+
         for combo in combos_to_update:
-            if not combo:
-                ConfigManager.console_print("Error: Null combo box encountered")
-                continue
-            
             if not isinstance(combo, QComboBox):
-                ConfigManager.console_print(f"Error: Invalid combo box type: {type(combo)}")
                 continue
-            
-            ConfigManager.console_print(f"\nUpdating combo box: {combo.objectName()}")
-            ConfigManager.console_print(f"Combo box exists: {combo is not None}")
-            ConfigManager.console_print(f"Combo box visible: {combo.isVisible()}")
-            ConfigManager.console_print(f"Combo box enabled: {combo.isEnabled()}")
-            ConfigManager.console_print(f"Current items: {[combo.itemText(i) for i in range(combo.count())]}")
-            
-            # Store current state
-            was_enabled = combo.isEnabled()
-            current_text = combo.currentText()
-            ConfigManager.console_print(f"Current state - enabled: {was_enabled}, text: {current_text}")
-            
-            # Block signals and clear
+
+            # Fall back to the configured value when nothing is typed in the combo yet.
+            desired_text = combo.currentText()
+            if not desired_text:
+                config_key = 'cleanup_model' if combo is self.cleanup_model_combo else 'instruction_model'
+                desired_text = ConfigManager.get_config_value('llm_post_processing', config_key) or ''
+
             combo.blockSignals(True)
             combo.clear()
-            ConfigManager.console_print("Cleared combo box")
-            
-            combo_options = list(models or [])
-            if not combo_options and self.llm_processor and self.llm_processor.api_type == 'openai':
-                combo_options = self._default_llm_model_choices()
-                ConfigManager.console_print("Using default OpenAI model list for dropdown population")
-            elif not combo_options:
-                message = "No models found - Is Ollama running?" if self.llm_processor and self.llm_processor.api_type == 'ollama' else "No models available - Check API key"
-                combo.addItem(message)
-                ConfigManager.console_print(f"Added message: {message}")
-            
-            for model_option in combo_options:
-                combo.addItem(str(model_option))
-                ConfigManager.console_print(f"Added model: {model_option}")
-            
-            # Determine the desired selection preference
-            desired_text = current_text or ''
-            if not desired_text:
-                config_key = 'cleanup_model' if combo == self.cleanup_model_combo else 'instruction_model'
-                desired_text = ConfigManager.get_config_value('llm_post_processing', config_key) or ''
-                ConfigManager.console_print(f"Config model fallback for {config_key}: {desired_text}")
-            
+            combo.addItems(combo_options)
+
             if desired_text:
                 index = combo.findText(desired_text)
-                if index == -1 and combo_options:
+                if index == -1:
                     combo.insertItem(0, desired_text)
                     index = 0
-                    ConfigManager.console_print(f"Inserted custom model at top: {desired_text}")
-                if index >= 0:
-                    combo.setCurrentIndex(index)
-                    ConfigManager.console_print(f"Set combo selection to: {desired_text}")
-            elif combo.count() > 0:
+                combo.setCurrentIndex(index)
+            elif combo.count():
                 combo.setCurrentIndex(0)
-                ConfigManager.console_print(f"Defaulted combo selection to: {combo.currentText()}")
-            
-            # Restore state and force update
-            combo.setEnabled(True)
             combo.blockSignals(False)
-            combo.repaint()
-            
-            # Verify final state
-            ConfigManager.console_print(f"Final state - count: {combo.count()}")
-            ConfigManager.console_print(f"Final items: {[combo.itemText(i) for i in range(combo.count())]}")
-            ConfigManager.console_print(f"Current text: {combo.currentText()}")
-            ConfigManager.console_print(f"Enabled: {combo.isEnabled()}")
-            ConfigManager.console_print(f"Visible: {combo.isVisible()}")
-        
-        # Force a UI update
-        QApplication.processEvents()
-        ConfigManager.console_print("=== UI update complete ===\n")
-        self.update_temperature_visibility()
 
-    def showEvent(self, event):
-        """Handle window show event to initialize models."""
-        super().showEvent(event)
-        if self.model_combo:
-            self.refresh_model_choices()
+            combo.setEnabled(True)
+            if combo.lineEdit():
+                combo.lineEdit().setPlaceholderText(status)
+
+        self.update_temperature_visibility()
 
     def browse_system_message_file(self, file_edit, text_edit):
         """Browse for a system message file and load its contents."""
@@ -975,9 +890,7 @@ class SettingsWindow(BaseWindow):
             file_edit.setText(file_path)
             try:
                 with open(file_path, 'r', encoding='utf-8') as file:
-                    content = file.read()
-                    current_text = text_edit.toPlainText()
-                    text_edit.setText(current_text)
+                    text_edit.setText(file.read())
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to read file: {str(e)}")
 
@@ -989,43 +902,35 @@ class SettingsWindow(BaseWindow):
             self.toggle_api_local_options(use_api)
 
     def get_available_sound_devices(self):
-        """Get list of available sound devices that support recording."""
+        """List the input devices, from PortAudio metadata only.
+
+        Deliberately does not open a stream per device to probe it: that made
+        opening the settings window slow and could disturb devices already in use.
+        """
         try:
             devices = sd.query_devices()
-            input_devices = []
-            for i, device in enumerate(devices):
-                try:
-                    # Test if we can open an input stream with this device
-                    with sd.InputStream(device=i, channels=1, samplerate=16000, blocksize=1024):
-                        pass  # If we get here, the device works for recording
-                    
-                    if device['max_input_channels'] > 0:  # Only include input devices
-                        name = f"{i}: {device['name']}"
-                        input_devices.append({
-                            'index': i,
-                            'name': name,
-                            'channels': device['max_input_channels'],
-                            'default': device is sd.default.device[0]
-                        })
-                except sd.PortAudioError as e:
-                    # ConfigManager.console_print(f"Device {i}: {device['name']} not suitable for recording: {str(e)}")
-                    continue
-                
-            return input_devices
-        except Exception as e:
-            ConfigManager.console_print(f"Error getting sound devices: {str(e)}")
+        except Exception as exc:
+            ConfigManager.console_print(f"Could not enumerate sound devices: {exc}")
             return []
 
-    def browse_find_replace_file(self, file_edit):
-        """Browse for a find/replace rules file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "Select Find/Replace Rules File", 
-            "", 
-            "Rule Files (*.txt *.json);;Text Files (*.txt);;JSON Files (*.json);;All Files (*)"
-        )
-        if file_path:
-            file_edit.setText(file_path)
+        try:
+            default_index = sd.default.device[0]
+        except Exception:
+            default_index = None
+
+        input_devices = []
+        for index, device in enumerate(devices):
+            if device.get('max_input_channels', 0) <= 0:
+                continue
+            input_devices.append({
+                'index': index,
+                'name': f"{index}: {device['name']}",
+                'channels': device['max_input_channels'],
+                # Compare indices: `device` is a dict, so comparing it to the
+                # default index was always False and nothing was ever marked default.
+                'default': index == default_index,
+            })
+        return input_devices
 
     def toggle_llm_provider_options(self, provider=None):
         """Toggle visibility of LLM provider-specific options based on selected provider."""
@@ -1042,46 +947,26 @@ class SettingsWindow(BaseWindow):
         provider_fields = {
             'openai': ['openai_api_key'],
             'azure_openai': ['azure_openai_llm_api_key', 'azure_openai_llm_endpoint',
-                           'azure_openai_llm_cleanup_deployment_name', 'azure_openai_llm_instruction_deployment_name',
-                           'azure_openai_llm_deployment_name', 'azure_openai_llm_api_version'],
+                             'azure_openai_llm_cleanup_deployment_name',
+                             'azure_openai_llm_cleanup_model_family',
+                             'azure_openai_llm_instruction_deployment_name',
+                             'azure_openai_llm_instruction_model_family',
+                             'azure_openai_llm_deployment_name',
+                             'azure_api_mode', 'azure_openai_llm_api_version'],
             'claude': ['claude_api_key'],
             'gemini': ['gemini_api_key'],
             'groq': ['groq_api_key'],
             'ollama': []  # No API key needed for Ollama
         }
         
-        # Hide all provider-specific fields first
-        all_fields = []
-        for fields in provider_fields.values():
-            all_fields.extend(fields)
-        
+        all_fields = {field for fields in provider_fields.values() for field in fields}
+        selected_fields = set(provider_fields.get(provider, []))
+
         for field in all_fields:
-            widget = self.findChild(QWidget, f'llm_post_processing_{field}_input')
-            label = self.findChild(QLabel, f'llm_post_processing_{field}_label')
-            help_button = self.findChild(QToolButton, f'llm_post_processing_{field}_help')
-            
-            if widget:
-                widget.setVisible(False)
-            if label:
-                label.setVisible(False)
-            if help_button:
-                help_button.setVisible(False)
-        
-        # Show only the fields for the selected provider
-        if provider in provider_fields:
-            for field in provider_fields[provider]:
-                widget = self.findChild(QWidget, f'llm_post_processing_{field}_input')
-                label = self.findChild(QLabel, f'llm_post_processing_{field}_label')
-                help_button = self.findChild(QToolButton, f'llm_post_processing_{field}_help')
-                
-                if widget:
-                    widget.setVisible(True)
-                    ConfigManager.console_print(f"Showing widget for {field}")
-                if label:
-                    label.setVisible(True)
-                if help_button:
-                    help_button.setVisible(True)
-        
+            self._set_setting_row_visible(
+                'llm_post_processing', None, field, field in selected_fields
+            )
+
         ConfigManager.console_print(f"Finished toggling options for provider: {provider}")
         self.update_temperature_visibility()
 
@@ -1093,39 +978,46 @@ class SettingsWindow(BaseWindow):
                 provider = self._get_combobox_value(provider_combo)
             else:
                 return
-        
+
         ConfigManager.console_print(f"Toggling transcription provider options for: {provider}")
-        
+
         # Map of provider to their specific fields
         provider_fields = {
-            'openai': ['openai_transcription_api_key'],
-            'azure_openai': ['azure_openai_api_key', 'azure_openai_endpoint', 
-                           'azure_openai_deployment_name', 'azure_openai_api_version'],
+            'openai': ['openai_transcription_api_key', 'base_url'],
+            'azure_openai': ['azure_openai_api_key', 'azure_openai_endpoint',
+                             'azure_openai_deployment_name', 'azure_openai_model_family',
+                             'azure_api_mode', 'azure_openai_api_version'],
             'deepgram': ['deepgram_transcription_api_key'],
             'groq': ['groq_transcription_api_key']
         }
-        
-        # Hide all provider-specific fields first
-        all_fields = []
-        for fields in provider_fields.values():
-            all_fields.extend(fields)
-        
+
+        # Only touch fields while the API section itself is visible; in local mode
+        # toggle_api_local_options owns their visibility.
+        use_api_checkbox = self.findChild(QCheckBox, 'model_options_use_api_input')
+        if use_api_checkbox and not use_api_checkbox.isChecked():
+            return
+
+        all_fields = {field for fields in provider_fields.values() for field in fields}
+        selected_fields = set(provider_fields.get(provider, []))
+
         for field in all_fields:
-            widget = self.findChild(QWidget, f'model_options_api_{field}_input')
-            label = self.findChild(QLabel, f'model_options_api_{field}_label')
-            help_button = self.findChild(QToolButton, f'model_options_api_{field}_help')
-            
-            if widget:
-                widget.setVisible(False)
-            if label:
-                label.setVisible(False)
-            if help_button:
-                help_button.setVisible(False)
-        
-        # Show only the fields for the selected provider
-        if provider in provider_fields:
-            for field in provider_fields[provider]:
-                widget = self.findChild(QWidget, f'model_options_api_{field}_input')
-                label = self.findChild(QLabel, f'model_options_api_{field}_label')
-                help_button = self.findChild(QToolButton, f'model_options_api_{field}_help')
+            self._set_setting_row_visible(
+                'model_options', 'api', field, field in selected_fields
+            )
+
+    def _set_setting_row_visible(self, category, sub_category, key, visible):
+        """Show or hide a whole settings row, label and help button included."""
+        prefix = f'{category}_{sub_category}_{key}' if sub_category else f'{category}_{key}'
+
+        row = self.setting_rows.get(prefix)
+        if row is not None:
+            # Hiding the whole row makes the layout reclaim its space and spacing.
+            row.setVisible(visible)
+
+        # Also set the flag on the editor itself: callers and tests ask about
+        # visibility by object name, and a hidden parent does not set that flag.
+        for widget_type, suffix in ((QWidget, 'input'), (QLabel, 'label'), (QToolButton, 'help')):
+            element = self.findChild(widget_type, f'{prefix}_{suffix}')
+            if element:
+                element.setVisible(visible)
                 

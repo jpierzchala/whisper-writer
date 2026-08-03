@@ -1,6 +1,7 @@
 import yaml
 import os
 import logging
+import sys
 from datetime import datetime
 
 class ConfigManager:
@@ -94,18 +95,31 @@ class ConfigManager:
             schema = yaml.safe_load(file)
         return schema
 
+    @staticmethod
+    def is_schema_metadata(key):
+        """True for schema keys that describe the UI rather than declare a setting.
+
+        Metadata keys are underscore-prefixed (`_ui`) so they can sit alongside
+        settings without the loaders mistaking them for a nested settings group.
+        """
+        return isinstance(key, str) and key.startswith('_')
+
     def load_default_config(self):
         """Load default configuration values from the schema."""
         def extract_value(item):
             if isinstance(item, dict):
                 if 'value' in item:
                     return item['value']
-                else:
-                    return {k: extract_value(v) for k, v in item.items()}
+                return {
+                    key: extract_value(value) for key, value in item.items()
+                    if not ConfigManager.is_schema_metadata(key)
+                }
             return item
 
         config = {}
         for category, settings in self.schema.items():
+            if self.is_schema_metadata(category):
+                continue
             config[category] = extract_value(settings)
         return config
 
@@ -168,14 +182,37 @@ class ConfigManager:
             
         if not show_message:
             return
-            
+
         # Print to console if enabled
         if config.get('print_to_terminal', True):
-            print(message)
-            
+            cls._print_safely(message)
+
         # Log to file if enabled
         if config.get('log_to_file', False) and cls._logger:
-            cls._logger.info(message)
+            try:
+                cls._logger.info(message)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _print_safely(message):
+        """Print without ever raising.
+
+        Logging is not worth losing work over: a transcript containing characters
+        the console cannot encode (Polish diacritics on a legacy code page) used to
+        raise UnicodeEncodeError from inside the transcription call, which the
+        surrounding handler turned into a discarded transcription.
+        """
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            encoding = getattr(sys.stdout, 'encoding', None) or 'ascii'
+            try:
+                print(str(message).encode(encoding, 'replace').decode(encoding, 'replace'))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     @classmethod
     def _setup_logging(cls):

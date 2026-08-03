@@ -39,45 +39,40 @@ def test_azure_openai_provider_configuration():
     
     sys.modules['utils'] = types.SimpleNamespace(ConfigManager=MockConfigManager)
     sys.modules['keyring_manager'] = types.SimpleNamespace(KeyringManager=MockKeyringManager)
-    
+
     # Import after mocking
     sys.path.insert(0, 'src')
     if 'transcription' in sys.modules:
         del sys.modules['transcription']
+    import transcription
     from transcription import transcribe_api
-    
-    # Mock requests.post to simulate API response
-    with patch('transcription.requests.post') as mock_post:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'text': 'Test transcription'}
-        mock_post.return_value = mock_response
-        
-        # Test with dummy audio data
+
+    with patch.object(transcription, 'build_azure_client') as mock_build_client, \
+         patch.object(transcription, 'encode_wav', return_value=b'RIFFfake'):
+        result_obj = MagicMock()
+        result_obj.text = 'Test transcription'
+        result_obj.languages = None
+        mock_build_client.return_value.audio.transcriptions.create.return_value = result_obj
+
         import numpy as np
         audio_data = np.array([0.1, 0.2, 0.1], dtype=np.float32)
-        
+
         result = transcribe_api(audio_data)
-        
-        # Verify the result
+
         assert result == 'Test transcription'
-        
-        # Verify the API was called with correct parameters
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        
-        # Check that the URL contains the Azure OpenAI endpoint structure
-        assert 'test.openai.azure.com' in call_args[0][0]
-        assert 'whisper-deployment' in call_args[0][0]
-        assert 'audio/transcriptions' in call_args[0][0]
-        
-        # Check headers contain api-key
-        assert 'api-key' in call_args[1]['headers']
-        assert call_args[1]['headers']['api-key'] == 'test-api-key'
-        
-        # Check params contain api-version
-        assert 'api-version' in call_args[1]['params']
-        assert call_args[1]['params']['api-version'] == '2024-02-01'
+
+        # The client is built for the configured resource, in legacy mode because a
+        # dated api-version is set (Azure has no v1 audio endpoint).
+        mock_build_client.assert_called_once()
+        args, kwargs = mock_build_client.call_args
+        assert args[0] == 'test-api-key'
+        assert args[1] == 'https://test.openai.azure.com'
+        assert kwargs['api_mode'] == 'legacy'
+        assert kwargs['api_version'] == '2024-02-01'
+
+        # The deployment name is what goes on the wire as the model.
+        create_kwargs = mock_build_client.return_value.audio.transcriptions.create.call_args.kwargs
+        assert create_kwargs['model'] == 'whisper-deployment'
 
 def test_azure_openai_missing_credentials():
     """Test Azure OpenAI provider handles missing credentials gracefully."""
