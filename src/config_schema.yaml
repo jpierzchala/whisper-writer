@@ -610,10 +610,11 @@ llm_post_processing:
     description: |
       Which model the cleanup deployment actually runs. 'auto' infers it from the
       deployment name, which works when the name starts with the model ID (for
-      example 'gpt-5.6-luna-datazone'). Pin it explicitly if your deployment has
+      example 'gpt-6-luna-dzs'). Pin it explicitly if your deployment has
       an unrelated name, otherwise the wrong API and parameters may be used.
     options:
       - auto
+      - gpt-6
       - gpt-5.6
       - gpt-5.4
       - gpt-5.2
@@ -632,6 +633,7 @@ llm_post_processing:
     description: "Which model the instruction deployment actually runs. See the cleanup equivalent."
     options:
       - auto
+      - gpt-6
       - gpt-5.6
       - gpt-5.4
       - gpt-5.2

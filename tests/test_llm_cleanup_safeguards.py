@@ -51,7 +51,7 @@ def test_reasoning_effort_comes_from_config_and_is_clamped_to_the_model():
         mock_config.get_config_value.side_effect = lambda *keys: 'high'
         assert processor._get_configured_effort('cleanup') == 'high'
 
-        # 'max' only exists on gpt-5.6; older families clamp down instead of 400ing,
+        # 'max' exists on gpt-5.6 and gpt-6; older families clamp down instead of 400ing,
         # to the nearest level they do support rather than to the cheapest one.
         assert processor._resolve_reasoning_effort(resolve_llm_capabilities('gpt-5.6-luna'), 'cleanup') == 'high'
         mock_config.get_config_value.side_effect = lambda *keys: 'max'
@@ -129,6 +129,85 @@ def test_azure_cleanup_sends_instructions_schema_and_explicit_effort():
 
         # v1 mode means no dated api-version is sent to the client builder.
         assert mock_build_client.call_args.kwargs['api_mode'] == 'v1'
+
+    sys.path.pop(0)
+
+
+def test_gpt6_azure_cleanup_uses_responses_with_explicit_none_effort():
+    sys.path.insert(0, 'src')
+
+    with patch('llm_processor.ConfigManager') as mock_config, \
+         patch('llm_processor.KeyringManager') as mock_keyring, \
+         patch('llm_processor.build_azure_client') as mock_build_client:
+
+        mock_config.get_config_section.return_value = {
+            'api_type': 'azure_openai', 'enabled': True, 'temperature': 0.3
+        }
+        mock_config.get_config_value.side_effect = _azure_config_values({
+            ('llm_post_processing', 'azure_openai_llm_cleanup_deployment_name'): 'gpt-6-luna-dzs',
+            ('llm_post_processing', 'cleanup_reasoning_effort'): 'none',
+        })
+        mock_config.console_print = lambda *args, **kwargs: None
+        mock_config.should_log_cleanup_prompt.return_value = False
+        mock_keyring.get_api_key.return_value = 'test-key'
+
+        client = MagicMock()
+        client.responses.create.return_value = _responses_result('{"cleaned_text": "Cleaned text"}')
+        mock_build_client.return_value = client
+
+        from llm_processor import LLMProcessor
+
+        processor = LLMProcessor(api_type='azure_openai')
+        assert processor.process_text('raw text', 'System message', mode='cleanup') == 'Cleaned text'
+
+        client.responses.create.assert_called_once()
+        client.chat.completions.create.assert_not_called()
+        kwargs = client.responses.create.call_args.kwargs
+        assert kwargs['model'] == 'gpt-6-luna-dzs'
+        assert kwargs['reasoning'] == {'effort': 'none'}
+        assert kwargs['text']['format']['type'] == 'json_schema'
+        assert 'max_output_tokens' in kwargs
+        assert not {'temperature', 'top_p', 'max_tokens', 'max_completion_tokens',
+                    'reasoning_effort'} & kwargs.keys()
+
+    sys.path.pop(0)
+
+
+def test_gpt6_azure_instruction_uses_responses_with_explicit_low_effort():
+    sys.path.insert(0, 'src')
+
+    with patch('llm_processor.ConfigManager') as mock_config, \
+         patch('llm_processor.KeyringManager') as mock_keyring, \
+         patch('llm_processor.build_azure_client') as mock_build_client:
+
+        mock_config.get_config_section.return_value = {
+            'api_type': 'azure_openai', 'enabled': True, 'temperature': 0.3
+        }
+        mock_config.get_config_value.side_effect = _azure_config_values({
+            ('llm_post_processing', 'azure_openai_llm_instruction_deployment_name'): 'gpt-6-luna-dzs',
+            ('llm_post_processing', 'instruction_reasoning_effort'): 'low',
+        })
+        mock_config.console_print = lambda *args, **kwargs: None
+        mock_keyring.get_api_key.return_value = 'test-key'
+
+        client = MagicMock()
+        client.responses.create.return_value = _responses_result('The request works.')
+        mock_build_client.return_value = client
+
+        from llm_processor import LLMProcessor
+
+        processor = LLMProcessor(api_type='azure_openai')
+        assert processor.process_text('Check the service.', 'System message', mode='instruction') == 'The request works.'
+
+        client.responses.create.assert_called_once()
+        client.chat.completions.create.assert_not_called()
+        kwargs = client.responses.create.call_args.kwargs
+        assert kwargs['model'] == 'gpt-6-luna-dzs'
+        assert kwargs['reasoning'] == {'effort': 'low'}
+        assert kwargs['text'] == {'verbosity': 'low'}
+        assert 'max_output_tokens' in kwargs
+        assert not {'temperature', 'top_p', 'max_tokens', 'max_completion_tokens',
+                    'reasoning_effort'} & kwargs.keys()
 
     sys.path.pop(0)
 

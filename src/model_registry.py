@@ -6,7 +6,7 @@ the answer cannot drift between the LLM processor, the transcription layer and
 the settings UI.
 
 Lookups are longest-prefix matches on the model ID, which also resolves Azure
-deployment names that carry a suffix (``gpt-5.6-luna-global`` -> ``gpt-5.6-luna``).
+deployment names that carry a suffix (``gpt-6-luna-dzs`` -> ``gpt-6-luna``).
 Deployments named something unrelated to their model fall back to a conservative
 default; pin them explicitly with the ``*_model_family`` setting instead.
 """
@@ -86,6 +86,7 @@ def _reasoning(efforts, **overrides):
     )
 
 
+_GPT6_EFFORTS = (EFFORT_NONE, EFFORT_LOW, EFFORT_MEDIUM, EFFORT_HIGH, EFFORT_XHIGH, EFFORT_MAX)
 _GPT56_EFFORTS = (EFFORT_NONE, EFFORT_LOW, EFFORT_MEDIUM, EFFORT_HIGH, EFFORT_XHIGH, EFFORT_MAX)
 _GPT54_EFFORTS = (EFFORT_NONE, EFFORT_LOW, EFFORT_MEDIUM, EFFORT_HIGH, EFFORT_XHIGH)
 _GPT51_EFFORTS = (EFFORT_NONE, EFFORT_LOW, EFFORT_MEDIUM, EFFORT_HIGH)
@@ -101,6 +102,8 @@ _CHAT_MODEL = LLMCapabilities(
 
 # Longest matching prefix wins, so more specific IDs may appear in any order.
 LLM_CAPABILITIES = {
+    'gpt-6-sol': _reasoning(_GPT6_EFFORTS),
+    'gpt-6-luna': _reasoning(_GPT6_EFFORTS),
     'gpt-5.6': _reasoning(_GPT56_EFFORTS),
     'gpt-5.5': _reasoning(_GPT54_EFFORTS),
     'gpt-5.4': _reasoning(_GPT54_EFFORTS),
@@ -120,9 +123,10 @@ LLM_CAPABILITIES = {
 # Explicit family values the user can pin on an Azure deployment whose name does
 # not identify its model. 'auto' means "infer from the deployment name".
 AZURE_MODEL_FAMILY_AUTO = 'auto'
-AZURE_LLM_FAMILIES = (AZURE_MODEL_FAMILY_AUTO, 'gpt-5.6', 'gpt-5.4', 'gpt-5.2', 'chat')
+AZURE_LLM_FAMILIES = (AZURE_MODEL_FAMILY_AUTO, 'gpt-6', 'gpt-5.6', 'gpt-5.4', 'gpt-5.2', 'chat')
 
 _AZURE_FAMILY_CAPABILITIES = {
+    'gpt-6': _reasoning(_GPT6_EFFORTS),
     'chat': _CHAT_MODEL,
 }
 

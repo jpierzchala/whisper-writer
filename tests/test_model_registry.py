@@ -2,12 +2,14 @@
 import sys
 
 import pytest
+import yaml
 
 sys.path.insert(0, 'src')
 
 from model_registry import (
     API_CHAT,
     API_RESPONSES,
+    AZURE_LLM_FAMILIES,
     resolve_llm_capabilities,
     resolve_transcription_capabilities,
     is_reasoning_model,
@@ -21,6 +23,7 @@ from openai_clients import (
 
 
 @pytest.mark.parametrize("model", [
+    'gpt-6-luna', 'gpt-6-sol', 'gpt-6-luna-dzs', 'gpt-6-sol-dzs',
     'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.4', 'gpt-5.2', 'gpt-5.1', 'o3',
 ])
 def test_reasoning_models_use_the_responses_api_and_reject_temperature(model):
@@ -40,8 +43,10 @@ def test_classic_chat_models_take_a_temperature(model):
     assert not is_reasoning_model(model)
 
 
-def test_effort_max_is_only_available_on_gpt_5_6():
+def test_effort_max_is_available_on_gpt_5_6_and_gpt_6():
     assert 'max' in resolve_llm_capabilities('gpt-5.6-luna').reasoning_efforts
+    for model in ('gpt-6-luna', 'gpt-6-sol'):
+        assert 'max' in resolve_llm_capabilities(model).reasoning_efforts
     for older in ('gpt-5.4', 'gpt-5.2', 'gpt-5.1'):
         assert 'max' not in resolve_llm_capabilities(older).reasoning_efforts
 
@@ -49,10 +54,19 @@ def test_effort_max_is_only_available_on_gpt_5_6():
 def test_effort_minimal_only_exists_on_the_original_gpt5_family():
     """'minimal' was replaced by 'none' from gpt-5.1 onwards and is rejected by it."""
     assert 'minimal' in resolve_llm_capabilities('gpt-5-2025-08-07').reasoning_efforts
-    for newer in ('gpt-5.1', 'gpt-5.2', 'gpt-5.4', 'gpt-5.6-luna'):
+    for newer in ('gpt-5.1', 'gpt-5.2', 'gpt-5.4', 'gpt-5.6-luna', 'gpt-6-luna', 'gpt-6-sol'):
         efforts = resolve_llm_capabilities(newer).reasoning_efforts
         assert 'minimal' not in efforts
         assert 'none' in efforts
+
+
+@pytest.mark.parametrize('model', ['gpt-6-luna', 'gpt-6-sol'])
+def test_gpt_6_efforts_and_clamping(model):
+    caps = resolve_llm_capabilities(model)
+    assert caps.reasoning_efforts == ('none', 'low', 'medium', 'high', 'xhigh', 'max')
+    assert caps.clamp_effort('none') == 'none'
+    assert caps.clamp_effort('low') == 'low'
+    assert caps.clamp_effort('minimal') == 'none'
 
 
 def test_clamp_effort_picks_the_nearest_supported_level_at_or_below():
@@ -83,6 +97,8 @@ def test_clamp_effort_handles_an_unrecognised_value():
 def test_azure_deployment_names_with_suffixes_resolve_to_their_model():
     """Deployments are usually named after the model with an environment suffix."""
     assert resolve_llm_capabilities('gpt-5.6-luna-global').api == API_RESPONSES
+    assert resolve_llm_capabilities('gpt-6-luna-dzs').api == API_RESPONSES
+    assert resolve_llm_capabilities('gpt-6-sol-dzs').api == API_RESPONSES
     assert resolve_llm_capabilities('gpt-5.4-global').api == API_RESPONSES
     assert resolve_llm_capabilities('gpt-4o-prod').api == API_CHAT
 
@@ -92,11 +108,22 @@ def test_unrelated_deployment_names_fall_back_to_plain_chat():
     caps = resolve_llm_capabilities('prod-cleanup')
     assert caps.api == API_CHAT
     assert not caps.is_reasoning_model
+    assert resolve_llm_capabilities('gpt-6-astra').api == API_CHAT
 
 
 def test_pinned_family_overrides_the_deployment_name():
     assert resolve_llm_capabilities('prod-cleanup', family='gpt-5.6').api == API_RESPONSES
+    assert resolve_llm_capabilities('prod-cleanup', family='gpt-6').api == API_RESPONSES
+    assert resolve_llm_capabilities('gpt-6-luna-dzs', family='chat').api == API_CHAT
     assert resolve_llm_capabilities('gpt-5.6-luna-global', family='chat').api == API_CHAT
+
+
+def test_azure_llm_family_options_match_the_registry():
+    with open('src/config_schema.yaml', encoding='utf-8') as handle:
+        schema = yaml.safe_load(handle)
+    for key in ('azure_openai_llm_cleanup_model_family',
+                'azure_openai_llm_instruction_model_family'):
+        assert tuple(schema['llm_post_processing'][key]['options']) == AZURE_LLM_FAMILIES
 
 
 def test_gpt_transcribe_uses_the_plural_languages_field_and_accepts_keywords():

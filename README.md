@@ -265,7 +265,7 @@ For substitutions that must always happen regardless of what the model decides, 
 - `groq_api_key`: Your API key for the Groq LLM service. Required for Groq post-processing. (Default: `null`)
 - `azure_openai_llm_api_key` / `azure_openai_llm_endpoint`: Credentials for the Azure OpenAI / Foundry resource. (Default: `null`)
 - `azure_openai_llm_cleanup_deployment_name` / `azure_openai_llm_instruction_deployment_name`: Your Azure deployment names, e.g. `gpt-5.6-luna-datazone`. On Azure these select the model; `cleanup_model` and `instruction_model` are ignored.
-- `azure_openai_llm_cleanup_model_family` / `azure_openai_llm_instruction_model_family`: Which model each deployment runs. `auto` infers it from the deployment name; pin it if your deployment has an unrelated name. (Default: `auto`)
+- `azure_openai_llm_cleanup_model_family` / `azure_openai_llm_instruction_model_family`: Which model each deployment runs (`gpt-6`, `gpt-5.6`, `gpt-5.4`, `gpt-5.2`, or `chat`). `auto` infers it from the deployment name; pin it if your deployment has an unrelated name. (Default: `auto`)
 - `azure_api_mode`: `v1` uses the current OpenAI-compatible Azure API, which needs no api-version and works with both `*.openai.azure.com` and Foundry `*.services.ai.azure.com` endpoints. (Default: `v1`)
 - `cleanup_model`: The model to use for cleanup post-processing. (Default: `gpt-5.6-luna`)
 - `instruction_model`: The model to use for instruction post-processing. (Default: `gpt-5.6-luna`)
@@ -291,7 +291,7 @@ If any of the configuration options are invalid or not provided, the program wil
 ### Azure OpenAI / Microsoft Foundry Setup
 
 1. **Create the resource** in the Azure portal or in AI Foundry.
-2. **Deploy the models** you want: a transcription model (`gpt-transcribe` is recommended) and, for post-processing, a chat/reasoning model (`gpt-5.6-luna`).
+2. **Deploy the models** you want: a transcription model (`gpt-transcribe` is recommended) and a post-processing deployment such as `gpt-5.6-luna` or `gpt-6-luna`.
 3. **Configure the transcription side** (Transcription tab):
    - `provider`: `azure_openai`
    - `azure_openai_api_key` and `azure_openai_endpoint` — any of the three hostname forms works, including the Foundry `https://NAME.services.ai.azure.com`
