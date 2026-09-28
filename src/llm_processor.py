@@ -277,9 +277,9 @@ class LLMProcessor:
     def _resolve_reasoning_effort(self, capabilities, mode: str) -> str | None:
         """Effort to send for this model/mode, clamped to what the model accepts.
 
-        GPT-5.6 defaults to 'medium' server-side, so the effort is always sent
-        explicitly: omitting it would silently add thinking latency to every
-        dictation.
+        GPT-5.6 defaults to 'medium' server-side, and the GPT-6 default is
+        undocumented. Always send effort explicitly to avoid unexpected
+        thinking latency during dictation.
         """
         if not capabilities.is_reasoning_model:
             return None

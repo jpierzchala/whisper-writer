@@ -59,12 +59,25 @@ def test_temperature_visibility_toggles(settings_window, qapp):
     qapp.processEvents()
     assert settings_window._should_hide_temperature() is False
 
+    cleanup_combo.setCurrentText('gpt-6-luna')
+    instruction_combo.setCurrentText('gpt-6-luna')
+    settings_window.update_temperature_visibility()
+    qapp.processEvents()
+    temperature_input = settings_window.findChild(
+        QWidget, 'llm_post_processing_temperature_input'
+    )
+    assert temperature_input is not None and temperature_input.isHidden()
 
-def test_default_llm_model_choices_include_gpt54():
+
+def test_default_llm_model_choices_include_gpt54_and_gpt6():
     sys.path.insert(0, 'src')
     from ui.settings_window import SettingsWindow
 
-    assert 'gpt-5.4' in SettingsWindow._default_llm_model_choices()
+    choices = SettingsWindow._default_llm_model_choices()
+    assert choices[0] == 'gpt-5.6-luna'
+    assert 'gpt-5.4' in choices
+    assert 'gpt-6-luna' in choices
+    assert 'gpt-6-sol' in choices
 
     sys.path.pop(0)
 

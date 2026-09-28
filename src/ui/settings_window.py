@@ -25,13 +25,15 @@ from ui.model_refresh_worker import ModelRefreshWorker
 from whisper_languages import WHISPER_LANGUAGE_CHOICES, normalize_whisper_language
 
 QWIDGET_IS_TYPE = isinstance(QWidget, type)
-# Models offered in the cleanup/instruction dropdowns, best default first. Kept to
-# models that are current on both OpenAI and Azure as of July 2026; the combo is
-# editable so anything else can still be typed in.
+# Models offered in the cleanup/instruction dropdowns, best default first.
+# GPT-6 is verified on Azure; its OpenAI API availability is not yet verified.
+# The combo is editable so anything else can still be typed in.
 CURATED_LLM_MODELS = (
     'gpt-5.6-luna',
     'gpt-5.6-terra',
     'gpt-5.6-sol',
+    'gpt-6-luna',
+    'gpt-6-sol',
     'gpt-5.4',
     'gpt-5.4-mini',
     'gpt-5.2',
@@ -471,7 +473,7 @@ class SettingsWindow(BaseWindow):
 
     @staticmethod
     def _default_llm_model_choices():
-        """Currently supported OpenAI model IDs, best default first.
+        """Curated model IDs, best default first.
 
         Retired and deprecated models are deliberately absent: the combo stays
         editable, so anything omitted here can still be typed in by hand.
